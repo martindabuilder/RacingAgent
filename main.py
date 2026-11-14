@@ -2,7 +2,7 @@ from direct.showbase.ShowBase import ShowBase
 from panda3d.core import WindowProperties
 from simulation.vehicle import F1Vehicle
 from track.track_geometry import TrackGeometry
-from track.track_mesh import TrackMesh
+from track.track_model import TrackModel
 
 class F1Simulator(ShowBase):
     def __init__(self):
@@ -13,8 +13,8 @@ class F1Simulator(ShowBase):
 
         self.win.requestProperties(properties)
         self.track = TrackGeometry()
-        self.track_mesh = TrackMesh(self.render, self.track)
-        self.track_mesh.create()
+        self.track_model = TrackModel(self.render, self.loader)
+        self.track_model.load()
 
         self.vehicle = F1Vehicle(self.render, self.loader)
         start_x = self.track.centerline[0][0]
