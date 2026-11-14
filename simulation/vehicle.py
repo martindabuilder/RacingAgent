@@ -10,7 +10,8 @@ class F1Vehicle:
         model_path = "assets/models/2020_f1_mercedes-benz_w11.glb"
         self.model = self.loader.loadModel(model_path)
         self.model.reparentTo(self.car)
-        self.model.setScale(0.8)
+
+        self.model.setScale(2)
         self.model.setPos(0, 0, 0)
         print("Mercedes AMG W11 model loaded!")
 

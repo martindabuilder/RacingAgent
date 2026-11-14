@@ -59,6 +59,19 @@ class TrackGeometry:
         closing_distance = np.linalg.norm(self.centerline[0] - self.centerline[-1])
 
         return np.sum(segment_lengths) + closing_distance
+            
+    def get_heading(self, index):
+        next_index = (index + 1) % len(self.centerline)
+
+        current_point = self.centerline[index]
+        next_point = self.centerline[next_index]
+
+        dx = next_point[0] - current_point[0]
+        dy = next_point[1] - current_point[1]
+
+        heading = np.degrees(np.arctan2(dx, dy))
+
+        return heading
 
 
 if __name__ == "__main__":
