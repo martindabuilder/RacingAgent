@@ -164,7 +164,6 @@ class YasMarinaSimulator(ShowBase):
 
         self.camLens.setFov(50)
 
-  
         self.filters = CommonFilters(
             self.win,
             self.cam,

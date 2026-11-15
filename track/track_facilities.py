@@ -1,25 +1,33 @@
 import math
-
 import numpy as np
-
-from shapely.geometry import Polygon, Point
-
-from panda3d.core import (
-    Geom,
-    GeomNode,
-    GeomTriangles,
-    GeomVertexData,
-    GeomVertexFormat,
-    GeomVertexWriter,
-    TransparencyAttrib,
-    Material,
-    LColor,
-    PointLight,
-    Vec3,
-)
-
+from shapely import affinity
+from shapely.geometry import Polygon, Point, box
+from shapely.ops import nearest_points
+from shapely.prepared import prep
+from panda3d.core import (ColorBlendAttrib, Geom, GeomNode, GeomTriangles, GeomVertexData, GeomVertexFormat, GeomVertexWriter, LineSegs, TransparencyAttrib, Material, LColor, PointLight, Vec3,)
 
 class TrackFacilities:
+    BOX_FACES = (
+        ((0, 3, 2, 1), (0, 0, -1)),
+        ((4, 5, 6, 7), (0, 0, 1)),
+        ((0, 1, 5, 4), (0, -1, 0)),
+        ((1, 2, 6, 5), (1, 0, 0)),
+        ((2, 3, 7, 6), (0, 1, 0)),
+        ((3, 0, 4, 7), (-1, 0, 0)),
+    )
+
+    HOTEL_PALETTE = [
+        (0.10, 0.55, 1.00),
+        (0.00, 0.90, 1.00),
+        (0.45, 0.25, 1.00),
+        (0.90, 0.20, 1.00),
+    ]
+
+    TOWER_PALETTE = [
+        (0.10, 0.65, 1.00),
+        (0.00, 0.85, 1.00),
+        (0.35, 0.45, 1.00),
+    ]
 
     def __init__(self, render, track):
 
@@ -37,12 +45,14 @@ class TrackFacilities:
         self.hotel_side = -1
 
         self.occupied_sites = []
+        self.occupied_footprints = []
+
+        self.track_gap = 50.0
+        self.building_gap = 40.0
+        self._zone_cache = {}
 
         self.track_polygon = self.build_track_polygon()
 
-    # ---------------------------------------------------------
-    # TRACK POLYGON AND SAFE POSITIONING
-    # ---------------------------------------------------------
 
     def build_track_polygon(self):
 
@@ -129,104 +139,86 @@ class TrackFacilities:
 
         return position, heading, tangent, outward
 
-    def find_safe_site(
+    def footprint_polygon(
         self,
-        fraction,
-        preferred_side,
-        clearance,
+        position,
+        heading,
+        x_min,
+        x_max,
+        y_min,
+        y_max,
     ):
 
-        offsets = range(100, 1801, 10)
+        rect = box(x_min, y_min, x_max, y_max)
+
+        rect = affinity.rotate(
+            rect,
+            float(heading),
+            origin=(0, 0),
+        )
+
+        rect = affinity.translate(
+            rect,
+            float(position[0]),
+            float(position[1]),
+        )
+
+        return rect
+
+    def heading_toward_track(self, position):
+        point = Point(float(position[0]), float(position[1]))
+
+        _, nearest = nearest_points(point, self.track_polygon)
+
+        to_track = np.array([
+            nearest.x - point.x,
+            nearest.y - point.y,
+        ])
+
+        length = np.linalg.norm(to_track)
+
+        if length < 1e-6:
+            return None
+
+        to_track /= length
+
+        return math.degrees(
+            math.atan2(to_track[0], -to_track[1])
+        )
+
+    def _track_zone(self, gap):
+
+        key = round(float(gap), 1)
+
+        if key not in self._zone_cache:
+            self._zone_cache[key] = prep(
+                self.track_polygon.buffer(gap)
+            )
+
+        return self._zone_cache[key]
+
+    def find_building_site(
+        self,
+        base_fraction,
+        preferred_side,
+        extents,
+        track_gap=None,
+        building_gap=None,
+    ):
+  
+        track_gap = self.track_gap if track_gap is None else track_gap
+
+        building_gap = (
+            self.building_gap
+            if building_gap is None
+            else building_gap
+        )
+
+        x_min, x_max, y_min, y_max = extents
 
         fraction_offsets = [
             0.0,
             0.01, -0.01,
-            0.02, -0.02,
-            0.03, -0.03,
-            0.05, -0.05,
-            0.075, -0.075,
-            0.10, -0.10,
-            0.15, -0.15,
-            0.20, -0.20,
-        ]
-
-        best_distance = -1.0
-
-        for fraction_offset in fraction_offsets:
-
-            candidate_fraction = (
-                fraction + fraction_offset
-            ) % 1.0
-
-            for side in (
-                preferred_side,
-                -preferred_side,
-            ):
-
-                for offset in offsets:
-
-                    (
-                        position,
-                        heading,
-                        tangent,
-                        outward,
-                    ) = self.get_track_frame(
-                        candidate_fraction,
-                        side,
-                        offset,
-                    )
-
-                    point = Point(
-                        float(position[0]),
-                        float(position[1]),
-                    )
-
-                    distance = point.distance(
-                        self.track_polygon
-                    )
-
-                    best_distance = max(
-                        best_distance,
-                        distance,
-                    )
-
-                    if distance >= clearance:
-
-                        print(
-                            "[Facilities] Hotel site found: "
-                            f"fraction={candidate_fraction:.3f}, "
-                            f"side={side}, "
-                            f"offset={offset}, "
-                            f"clearance={distance:.1f}m"
-                        )
-
-                        return (
-                            position,
-                            heading,
-                            tangent,
-                            outward,
-                        )
-
-        raise RuntimeError(
-            "Could not find a safe hotel position. "
-            f"Required clearance: {clearance}m; "
-            f"best available: {best_distance:.1f}m."
-        )
-
-    # ---------------------------------------------------------
-    # ADDITIONAL BUILDING POSITION SEARCH
-    # ---------------------------------------------------------
-
-    def find_additional_site(
-        self,
-        base_fraction,
-        preferred_side,
-        clearance=100.0,
-        minimum_separation=190.0,
-    ):
-
-        fraction_offsets = [
-            0.0,
             0.025, -0.025,
             0.05, -0.05,
             0.075, -0.075,
@@ -236,86 +228,84 @@ class TrackFacilities:
             0.25, -0.25,
         ]
 
-        sides = [
-            preferred_side,
-            -preferred_side,
-        ]
+        offsets = range(60, 2001, 20)
 
-        offsets = range(150, 1801, 20)
+        # If no site is found, the track gap is reduced step by step.
+        for gap in (track_gap, track_gap * 0.6, track_gap * 0.3):
 
-        for fraction_offset in fraction_offsets:
+            zone = self._track_zone(gap)
 
-            candidate_fraction = (
-                base_fraction + fraction_offset
-            ) % 1.0
+            for fraction_offset in fraction_offsets:
 
-            for side in sides:
+                fraction = (base_fraction + fraction_offset) % 1.0
 
-                for offset in offsets:
+                for side in (preferred_side, -preferred_side):
 
-                    (
-                        position,
-                        heading,
-                        tangent,
-                        outward,
-                    ) = self.get_track_frame(
-                        candidate_fraction,
-                        side,
-                        offset,
-                    )
+                    for offset in offsets:
 
-                    candidate_point = Point(
-                        float(position[0]),
-                        float(position[1]),
-                    )
-
-                    track_clearance = (
-                        candidate_point.distance(
-                            self.track_polygon
-                        )
-                    )
-
-                    if track_clearance < clearance:
-                        continue
-
-                    too_close = False
-
-                    for occupied in self.occupied_sites:
-
-                        distance = np.linalg.norm(
-                            position - occupied
+                        position, _, _, _ = self.get_track_frame(
+                            fraction,
+                            side,
+                            offset,
                         )
 
-                        if distance < minimum_separation:
-                            too_close = True
-                            break
+                        point = Point(
+                            float(position[0]),
+                            float(position[1]),
+                        )
 
-                    if too_close:
-                        continue
+                        if zone.contains(point):
+                            continue
 
-                    print(
-                        "[Facilities] Additional building site: "
-                        f"fraction={candidate_fraction:.3f}, "
-                        f"side={side}, "
-                        f"offset={offset}, "
-                        f"track clearance={track_clearance:.1f}m"
-                    )
+                        heading = self.heading_toward_track(position)
 
-                    return (
-                        position,
-                        heading,
-                        tangent,
-                        outward,
-                    )
+                        if heading is None:
+                            continue
+
+                        footprint = self.footprint_polygon(
+                            position,
+                            heading,
+                            x_min,
+                            x_max,
+                            y_min,
+                            y_max,
+                        )
+
+                        # Whole footprint must stay away from the track.
+                        if zone.intersects(footprint):
+                            continue
+
+                        # ...and away from other buildings.
+                        if any(
+                            footprint.distance(other) < building_gap
+                            for other in self.occupied_footprints
+                        ):
+                            continue
+
+                        print(
+                            "[Facilities] Site found: "
+                            f"fraction={fraction:.3f}, side={side}, "
+                            f"offset={offset}, heading={heading:.1f}, "
+                            f"track gap={gap:.0f}m"
+                        )
+
+                        return position, heading, footprint
 
         print(
-            "[Facilities] Could not find a safe additional "
-            f"building site near fraction {base_fraction:.3f}."
+            "[Facilities] No valid site near fraction "
+            f"{base_fraction:.3f}."
         )
 
         return None
 
-    def make_anchor(self, name, position, heading):
+    def make_anchor(
+        self,
+        name,
+        position,
+        heading,
+        footprint=None,
+        check_facing=False,
+    ):
 
         anchor = self.root.attachNewNode(name)
 
@@ -331,11 +321,35 @@ class TrackFacilities:
             np.asarray(position, dtype=float).copy()
         )
 
-        return anchor
+        if footprint is not None:
+            self.occupied_footprints.append(footprint)
 
-    # ---------------------------------------------------------
-    # REAL LIGHT SOURCES
-    # ---------------------------------------------------------
+        if check_facing:
+
+            point = Point(float(position[0]), float(position[1]))
+
+            _, nearest = nearest_points(point, self.track_polygon)
+
+            wanted = np.array([
+                nearest.x - point.x,
+                nearest.y - point.y,
+            ])
+
+            wanted /= max(np.linalg.norm(wanted), 1e-8)
+
+            front = self.root.getRelativeVector(
+                anchor,
+                Vec3(0, -1, 0),
+            )
+
+            dot = front.x * wanted[0] + front.y * wanted[1]
+
+            print(
+                f"[Facilities] {name}: facing-track check "
+                f"= {dot:.2f} (1.0 = faces the track)"
+            )
+
+        return anchor
 
     def add_point_light(
         self,
@@ -344,15 +358,16 @@ class TrackFacilities:
         position,
         color,
         attenuation=(1.0, 0.003, 0.00004),
+        intensity=1.0,
     ):
 
         light = PointLight(name)
 
         light.setColor(
             LColor(
-                color[0],
-                color[1],
-                color[2],
+                color[0] * intensity,
+                color[1] * intensity,
+                color[2] * intensity,
                 1.0,
             )
         )
@@ -379,191 +394,84 @@ class TrackFacilities:
 
     def add_hotel_lighting(self, hotel):
 
-        # FRONT - cool blue illumination.
+        specs = [
+            ("front", (0, -80, 36), (0.30, 0.60, 1.0)),
+            ("rear", (0, 80, 36), (0.25, 0.45, 0.95)),
+            ("left", (-165, 0, 36), (0.25, 0.50, 0.95)),
+            ("right", (165, 0, 36), (0.25, 0.50, 0.95)),
+            ("roof", (0, 0, 100), (0.35, 0.55, 1.0)),
+        ]
 
-        self.add_point_light(
-            hotel,
-            "hotel_front_blue_light_left",
-            (-85, -58, 34),
-            (0.30, 0.55, 1.0),
-            attenuation=(1.0, 0.002, 0.000015),
-        )
+        for label, position, color in specs:
 
-        self.add_point_light(
-            hotel,
-            "hotel_front_blue_light_center",
-            (0, -58, 34),
-            (0.30, 0.65, 1.0),
-            attenuation=(1.0, 0.002, 0.000015),
-        )
+            self.add_point_light(
+                hotel,
+                f"hotel_{label}_light",
+                position,
+                color,
+                attenuation=(1.0, 0.002, 0.000015),
+                intensity=1.8,
+            )
 
-        self.add_point_light(
-            hotel,
-            "hotel_front_blue_light_right",
-            (85, -58, 34),
-            (0.30, 0.55, 1.0),
-            attenuation=(1.0, 0.002, 0.000015),
-        )
-
-        # REAR - softer blue illumination.
-
-        self.add_point_light(
-            hotel,
-            "hotel_rear_light_left",
-            (-75, 55, 35),
-            (0.20, 0.40, 0.85),
-            attenuation=(1.0, 0.003, 0.00002),
-        )
-
-        self.add_point_light(
-            hotel,
-            "hotel_rear_light_center",
-            (0, 55, 35),
-            (0.25, 0.45, 0.90),
-            attenuation=(1.0, 0.003, 0.00002),
-        )
-
-        self.add_point_light(
-            hotel,
-            "hotel_rear_light_right",
-            (75, 55, 35),
-            (0.20, 0.40, 0.85),
-            attenuation=(1.0, 0.003, 0.00002),
-        )
-
-        # LEFT AND RIGHT SIDES.
-
-        self.add_point_light(
-            hotel,
-            "hotel_left_side_light",
-            (-140, 0, 32),
-            (0.25, 0.50, 0.90),
-            attenuation=(1.0, 0.002, 0.00002),
-        )
-
-        self.add_point_light(
-            hotel,
-            "hotel_right_side_light",
-            (140, 0, 32),
-            (0.25, 0.50, 0.90),
-            attenuation=(1.0, 0.002, 0.00002),
-        )
-
-        # WINGS.
-
-        self.add_point_light(
-            hotel,
-            "hotel_west_wing_light",
-            (-65, -42, 48),
-            (0.20, 0.50, 1.0),
-            attenuation=(1.0, 0.002, 0.00002),
-        )
-
-        self.add_point_light(
-            hotel,
-            "hotel_east_wing_light",
-            (65, -42, 48),
-            (0.20, 0.50, 1.0),
-            attenuation=(1.0, 0.002, 0.00002),
-        )
-
-        # WARM ENTRANCE LIGHT.
+        # Warm entrance light.
 
         self.add_point_light(
             hotel,
             "hotel_entrance_warm_light",
-            (0, -67, 13),
+            (0, -70, 13),
             (1.0, 0.65, 0.30),
             attenuation=(1.0, 0.006, 0.00015),
+            intensity=1.5,
         )
 
-        # ROOF LIGHTING.
-
-        self.add_point_light(
-            hotel,
-            "hotel_roof_light_left",
-            (-75, 0, 68),
-            (0.35, 0.55, 1.0),
-            attenuation=(1.0, 0.003, 0.00002),
-        )
-
-        self.add_point_light(
-            hotel,
-            "hotel_roof_light_right",
-            (75, 0, 68),
-            (0.35, 0.55, 1.0),
-            attenuation=(1.0, 0.003, 0.00002),
-        )
-
-    def add_building_perimeter_lighting(
+    def add_tower_lighting(
         self,
-        parent,
-        name,
-        x,
-        y,
+        tower,
         width,
         depth,
         height,
     ):
 
-        half_width = width / 2
-        half_depth = depth / 2
+        h = height * 0.55
 
-        light_height = height * 0.60
+        specs = [
+            ("front", (0, -depth / 2 - 9, h), (0.40, 0.65, 1.0)),
+            ("rear", (0, depth / 2 + 9, h), (0.30, 0.50, 0.95)),
+            ("left", (-width / 2 - 9, 0, h), (0.35, 0.55, 1.0)),
+            ("right", (width / 2 + 9, 0, h), (0.35, 0.55, 1.0)),
+            ("roof", (0, 0, height + 8), (0.45, 0.60, 1.0)),
+        ]
 
-        # Front.
+        for label, position, color in specs:
 
-        self.add_point_light(
-            parent,
-            f"{name}_front_light",
-            (x, y - half_depth - 7, light_height),
-            (0.40, 0.65, 1.0),
-            attenuation=(1.0, 0.008, 0.00015),
+            self.add_point_light(
+                tower,
+                f"{tower.getName()}_{label}_light",
+                position,
+                color,
+                attenuation=(1.0, 0.008, 0.00015),
+                intensity=1.6,
+            )
+
+ 
+    def _make_unlit(self, node, boost=1.35):
+
+        node.setLightOff(1)
+        node.setShaderOff(1)
+        node.setColorScale(boost, boost, boost, 1.0)
+
+    def _set_additive(self, node):
+
+        node.setTransparency(TransparencyAttrib.MAlpha)
+        node.setDepthWrite(False)
+
+        node.setAttrib(
+            ColorBlendAttrib.make(
+                ColorBlendAttrib.MAdd,
+                ColorBlendAttrib.OIncomingAlpha,
+                ColorBlendAttrib.OOne,
+            )
         )
-
-        # Rear.
-
-        self.add_point_light(
-            parent,
-            f"{name}_rear_light",
-            (x, y + half_depth + 7, light_height),
-            (0.30, 0.50, 0.90),
-            attenuation=(1.0, 0.008, 0.00015),
-        )
-
-        # Left side.
-
-        self.add_point_light(
-            parent,
-            f"{name}_left_light",
-            (x - half_width - 7, y, light_height),
-            (0.35, 0.55, 1.0),
-            attenuation=(1.0, 0.008, 0.00015),
-        )
-
-        # Right side.
-
-        self.add_point_light(
-            parent,
-            f"{name}_right_light",
-            (x + half_width + 7, y, light_height),
-            (0.35, 0.55, 1.0),
-            attenuation=(1.0, 0.008, 0.00015),
-        )
-
-        # Roof.
-
-        self.add_point_light(
-            parent,
-            f"{name}_roof_light",
-            (x, y, height + 5),
-            (0.45, 0.60, 1.0),
-            attenuation=(1.0, 0.006, 0.0001),
-        )
-
-    # ---------------------------------------------------------
-    # EMISSIVE MATERIAL
-    # ---------------------------------------------------------
 
     def apply_emission(self, node, color, intensity=2.0):
 
@@ -589,13 +497,76 @@ class TrackFacilities:
         )
 
         node.setMaterial(material, 1)
-        node.setLightOff(1)
+        self._make_unlit(node)
 
         return node
 
-    # ---------------------------------------------------------
-    # GEOMETRY HELPERS
-    # ---------------------------------------------------------
+    def _build_boxes_node(self, name, boxes, alpha=1.0):
+        """
+        boxes = list of (center, size, color).
+        All boxes are merged in ONE geom, with outward facing
+        triangles and outward normals.
+        """
+
+        data = GeomVertexData(
+            name,
+            GeomVertexFormat.getV3n3c4(),
+            Geom.UHStatic,
+        )
+
+        vertex_writer = GeomVertexWriter(data, "vertex")
+        normal_writer = GeomVertexWriter(data, "normal")
+        color_writer = GeomVertexWriter(data, "color")
+
+        triangles = GeomTriangles(Geom.UHStatic)
+
+        for center, size, color in boxes:
+
+            cx, cy, cz = [float(v) for v in center]
+            sx, sy, sz = [float(v) / 2.0 for v in size]
+
+            vertices = [
+                (cx - sx, cy - sy, cz - sz),
+                (cx + sx, cy - sy, cz - sz),
+                (cx + sx, cy + sy, cz - sz),
+                (cx - sx, cy + sy, cz - sz),
+                (cx - sx, cy - sy, cz + sz),
+                (cx + sx, cy - sy, cz + sz),
+                (cx + sx, cy + sy, cz + sz),
+                (cx - sx, cy + sy, cz + sz),
+            ]
+
+            for face, normal in self.BOX_FACES:
+
+                start = data.getNumRows()
+
+                for index in face:
+
+                    vertex_writer.addData3(*vertices[index])
+
+                    normal_writer.addData3(
+                        float(normal[0]),
+                        float(normal[1]),
+                        float(normal[2]),
+                    )
+
+                    color_writer.addData4(
+                        float(color[0]),
+                        float(color[1]),
+                        float(color[2]),
+                        float(alpha),
+                    )
+
+                triangles.addVertices(start, start + 1, start + 2)
+                triangles.addVertices(start, start + 2, start + 3)
+
+        geom = Geom(data)
+        geom.addPrimitive(triangles)
+
+        node = GeomNode(name)
+        node.addGeom(geom)
+
+        return node
 
     def make_box(
         self,
@@ -609,113 +580,11 @@ class TrackFacilities:
         emissive=False,
     ):
 
-        sx, sy, sz = [
-            float(v) / 2.0
-            for v in size
-        ]
-
-        # A closed solid box with six faces.
-        vertices = [
-            (-sx, -sy, -sz),
-            (sx, -sy, -sz),
-            (sx, sy, -sz),
-            (-sx, sy, -sz),
-            (-sx, -sy, sz),
-            (sx, -sy, sz),
-            (sx, sy, sz),
-            (-sx, sy, sz),
-        ]
-
-        faces = [
-            (0, 1, 2, 3),
-            (4, 7, 6, 5),
-            (0, 4, 5, 1),
-            (1, 5, 6, 2),
-            (2, 6, 7, 3),
-            (3, 7, 4, 0),
-        ]
-
-        fmt = GeomVertexFormat.getV3n3c4()
-
-        data = GeomVertexData(
+        node = self._build_boxes_node(
             name,
-            fmt,
-            Geom.UHStatic,
+            [((0, 0, 0), size, color)],
+            alpha,
         )
-
-        vertex_writer = GeomVertexWriter(
-            data,
-            "vertex",
-        )
-
-        normal_writer = GeomVertexWriter(
-            data,
-            "normal",
-        )
-
-        color_writer = GeomVertexWriter(
-            data,
-            "color",
-        )
-
-        triangles = GeomTriangles(
-            Geom.UHStatic
-        )
-
-        for face in faces:
-
-            a, b, c, d = face
-
-            p0 = np.array(vertices[a])
-            p1 = np.array(vertices[b])
-            p2 = np.array(vertices[c])
-
-            normal = np.cross(
-                p1 - p0,
-                p2 - p0,
-            )
-
-            length = np.linalg.norm(normal)
-
-            if length > 0:
-                normal /= length
-
-            start = data.getNumRows()
-
-            for index in face:
-
-                vertex_writer.addData3(
-                    *vertices[index]
-                )
-
-                normal_writer.addData3(
-                    *normal
-                )
-
-                color_writer.addData4(
-                    float(color[0]),
-                    float(color[1]),
-                    float(color[2]),
-                    float(alpha),
-                )
-
-            triangles.addVertices(
-                start,
-                start + 1,
-                start + 2,
-            )
-
-            triangles.addVertices(
-                start,
-                start + 2,
-                start + 3,
-            )
-
-        geom = Geom(data)
-        geom.addPrimitive(triangles)
-
-        node = GeomNode(name)
-        node.addGeom(geom)
 
         result = parent.attachNewNode(node)
 
@@ -740,6 +609,80 @@ class TrackFacilities:
 
         return result
 
+    def make_box_batch(
+        self,
+        parent,
+        name,
+        boxes,
+        emissive=False,
+        alpha=1.0,
+        additive=False,
+    ):
+
+        if not boxes:
+            return None
+
+        node = self._build_boxes_node(name, boxes, alpha)
+
+        result = parent.attachNewNode(node)
+
+        if alpha < 1.0:
+
+            result.setTransparency(
+                TransparencyAttrib.MAlpha
+            )
+
+            result.setDepthWrite(False)
+
+        if emissive:
+            self._make_unlit(result)
+
+        if additive:
+            self._set_additive(result)
+
+        return result
+
+    def make_glow_batch(
+        self,
+        parent,
+        name,
+        boxes,
+        halo=0.45,
+        halo_alpha=0.20,
+    ):
+        """Bright unlit core + larger additive halo = glowing strips."""
+
+        core = self.make_box_batch(
+            parent,
+            name,
+            boxes,
+            emissive=True,
+        )
+
+        grown = [
+            (
+                center,
+                (
+                    size[0] + halo * 2,
+                    size[1] + halo * 2,
+                    size[2] + halo * 2,
+                ),
+                color,
+            )
+            for center, size, color in boxes
+        ]
+
+        glow = self.make_box_batch(
+            parent,
+            f"{name}_halo",
+            grown,
+            emissive=True,
+            alpha=halo_alpha,
+            additive=True,
+        )
+
+        return core, glow
+
     def make_line(
         self,
         parent,
@@ -748,8 +691,6 @@ class TrackFacilities:
         color,
         thickness=0.25,
     ):
-
-        from panda3d.core import LineSegs
 
         lines = LineSegs(name)
 
@@ -769,6 +710,7 @@ class TrackFacilities:
         )
 
         result.setLightOff(1)
+        result.setShaderOff(1)
 
         return result
 
@@ -781,6 +723,8 @@ class TrackFacilities:
         color,
         heading=0,
         segments=96,
+        alpha=1.0,
+        glow=False,
     ):
 
         rx, ry, rz = radii
@@ -851,24 +795,11 @@ class TrackFacilities:
             Geom.UHStatic,
         )
 
-        vertex_writer = GeomVertexWriter(
-            data,
-            "vertex",
-        )
+        vertex_writer = GeomVertexWriter(data, "vertex")
+        normal_writer = GeomVertexWriter(data, "normal")
+        color_writer = GeomVertexWriter(data, "color")
 
-        normal_writer = GeomVertexWriter(
-            data,
-            "normal",
-        )
-
-        color_writer = GeomVertexWriter(
-            data,
-            "color",
-        )
-
-        triangles = GeomTriangles(
-            Geom.UHStatic
-        )
+        triangles = GeomTriangles(Geom.UHStatic)
 
         for face in faces:
 
@@ -893,16 +824,22 @@ class TrackFacilities:
                     normal /= length
 
                 vertex_writer.addData3(
-                    *vertex
+                    float(vertex[0]),
+                    float(vertex[1]),
+                    float(vertex[2]),
                 )
 
                 normal_writer.addData3(
-                    *normal
+                    float(normal[0]),
+                    float(normal[1]),
+                    float(normal[2]),
                 )
 
                 color_writer.addData4(
-                    *color,
-                    1.0,
+                    float(color[0]),
+                    float(color[1]),
+                    float(color[2]),
+                    float(alpha),
                 )
 
             triangles.addVertices(
@@ -922,11 +859,235 @@ class TrackFacilities:
         result.setPos(*position)
         result.setH(float(heading))
 
+        if alpha < 1.0:
+
+            result.setTransparency(
+                TransparencyAttrib.MAlpha
+            )
+
+            result.setDepthWrite(False)
+
+        if glow:
+
+            self._make_unlit(result, 1.0)
+            self._set_additive(result)
+
         return result
 
-    # ---------------------------------------------------------
-    # HOTEL FACADE - DIAMOND GRID
-    # ---------------------------------------------------------
+    def add_glow_volume(
+        self,
+        parent,
+        name,
+        cx,
+        cy,
+        width,
+        depth,
+        z0,
+        z1,
+        led_levels,
+        palette,
+        offset_y=0.15,
+        offset_x=0.15,
+        overhang=0.0,
+        roof_z=None,
+        window_start=3.0,
+        window_step=4.5,
+    ):
+        """
+        LED bands, lit windows, glowing corner columns and a glowing
+        roof outline on ALL FOUR sides of a rectangular volume.
+        """
+
+        leds = []
+        lit = []
+        dark = []
+
+        faces = (
+            (0, -1, width, offset_y),   # front  (-Y)
+            (0, 1, width, offset_y),    # rear   (+Y)
+            (-1, 0, depth, offset_x),   # left   (-X)
+            (1, 0, depth, offset_x),    # right  (+X)
+        )
+
+        for face_index, (nx, ny, span, off) in enumerate(faces):
+
+            half = depth / 2.0 if ny else width / 2.0
+
+            # LED bands.
+
+            for k, z in enumerate(led_levels):
+
+                color = palette[(k + face_index) % len(palette)]
+
+                if ny:
+                    leds.append((
+                        (cx, cy + ny * (half + off + 0.12), z),
+                        (span * 0.96, 0.3, 0.45),
+                        color,
+                    ))
+                else:
+                    leds.append((
+                        (cx + nx * (half + off + 0.12), cy, z),
+                        (0.3, span * 0.96, 0.45),
+                        color,
+                    ))
+
+            # Windows.
+
+            count = max(3, int(span / 6.0))
+
+            floor = 0
+            z = z0 + window_start
+
+            while z < z1 - 2.0:
+
+                for i in range(count):
+
+                    u = -span / 2 + (i + 0.5) * span / count
+
+                    if ny:
+                        position = (cx + u, cy + ny * (half + off), z)
+                        size = (3.0, 0.16, 2.4)
+                    else:
+                        position = (cx + nx * (half + off), cy + u, z)
+                        size = (0.16, 3.0, 2.4)
+
+                    if (i * 3 + floor * 5 + face_index * 2) % 4 != 0:
+
+                        if (i + floor) % 5 == 0:
+                            color = (1.0, 0.80, 0.45)
+                        else:
+                            color = (0.75, 0.90, 1.0)
+
+                        lit.append((position, size, color))
+
+                    else:
+
+                        dark.append((
+                            position,
+                            size,
+                            (0.06, 0.16, 0.26),
+                        ))
+
+                floor += 1
+                z += window_step
+
+        # Corner columns.
+
+        corner_height = z1 - z0
+
+        for sx in (-1, 1):
+            for sy in (-1, 1):
+
+                leds.append((
+                    (
+                        cx + sx * (width / 2 + offset_x + 0.1),
+                        cy + sy * (depth / 2 + offset_y + 0.1),
+                        (z0 + z1) / 2,
+                    ),
+                    (0.6, 0.6, corner_height),
+                    palette[0],
+                ))
+
+        # Roof outline.
+
+        rz = roof_z if roof_z is not None else z1 + 0.3
+
+        rw = width + overhang * 2
+        rd = depth + overhang * 2
+
+        for sy in (-1, 1):
+            leds.append((
+                (cx, cy + sy * rd / 2, rz),
+                (rw, 0.5, 0.5),
+                palette[1 % len(palette)],
+            ))
+
+        for sx in (-1, 1):
+            leds.append((
+                (cx + sx * rw / 2, cy, rz),
+                (0.5, rd, 0.5),
+                palette[1 % len(palette)],
+            ))
+
+        self.make_glow_batch(parent, f"{name}_leds", leds)
+
+        self.make_box_batch(
+            parent,
+            f"{name}_windows_lit",
+            lit,
+            emissive=True,
+        )
+
+        self.make_box_batch(
+            parent,
+            f"{name}_windows_dark",
+            dark,
+            emissive=False,
+        )
+
+    def create_glow_tower(
+        self,
+        parent,
+        name,
+        x,
+        y,
+        width,
+        depth,
+        height,
+        body_color,
+        lights=True,
+    ):
+        """Building glowing on all four sides, with its own lights."""
+
+        tower = parent.attachNewNode(name)
+        tower.setPos(float(x), float(y), 0.0)
+
+        self.make_box(
+            tower,
+            f"{name}_main",
+            (0, 0, height / 2),
+            (width, depth, height),
+            body_color,
+        )
+
+        self.make_box(
+            tower,
+            f"{name}_roof",
+            (0, 0, height + 0.8),
+            (width + 3, depth + 3, 1.6),
+            (0.07, 0.10, 0.15),
+        )
+
+        levels = [
+            round(height * f, 1)
+            for f in (0.25, 0.50, 0.75, 0.96)
+        ]
+
+        self.add_glow_volume(
+            tower,
+            name,
+            0,
+            0,
+            width,
+            depth,
+            0,
+            height,
+            levels,
+            self.TOWER_PALETTE,
+            overhang=1.5,
+            roof_z=height + 1.8,
+        )
+
+        if lights:
+            self.add_tower_lighting(
+                tower,
+                width,
+                depth,
+                height,
+            )
+
+        return tower
 
     def create_hotel_lattice(
         self,
@@ -948,13 +1109,13 @@ class TrackFacilities:
             (0.65, 0.25, 1.0, 1.0),
         ]
 
-        u_min = -2.65
-        u_max = 2.65
+        # Full circumference (all sides of the dome).
+        u_min = -math.pi
+        u_max = math.pi
 
         v_min = -0.20
         v_max = 1.05
 
-        # Small clearance so the lattice follows the shell.
         surface_offset = 0.25
 
         def surface(u, v):
@@ -986,10 +1147,10 @@ class TrackFacilities:
 
         for direction in (-1, 1):
 
-            intercept = -4.5
+            intercept = -5.0
             line_index = 0
 
-            while intercept <= 4.5:
+            while intercept <= 5.0:
 
                 points = []
 
@@ -1027,7 +1188,7 @@ class TrackFacilities:
                         ),
                         points,
                         color,
-                        2.8,
+                        3.0,
                     )
 
                 intercept += spacing
@@ -1051,13 +1212,47 @@ class TrackFacilities:
                 parent,
                 f"{name}_outline_{label}",
                 points,
-                (0.15, 0.75, 1.0, 1.0),
-                3.5,
+                (0.15, 0.85, 1.0, 1.0),
+                4.0,
             )
 
-    # ---------------------------------------------------------
-    # MAIN CREATION
-    # ---------------------------------------------------------
+    def create_hotel_rings(
+        self,
+        parent,
+        name,
+        center_x,
+        rx,
+        ry,
+        rz,
+        center_z,
+        levels,
+        color=(0.2, 0.85, 1.0, 1.0),
+        thickness=4.0,
+    ):
+        """Full glowing rings around the dome (all sides)."""
+
+        for k, v in enumerate(levels):
+
+            points = []
+
+            for i in range(145):
+
+                u = -math.pi + 2 * math.pi * i / 144
+
+                points.append((
+                    center_x + (rx + 0.3) * math.cos(v) * math.cos(u),
+                    (ry + 0.3) * math.cos(v) * math.sin(u),
+                    center_z + (rz + 0.3) * math.sin(v),
+                ))
+
+            self.make_line(
+                parent,
+                f"{name}_ring_{k}",
+                points,
+                color,
+                thickness,
+            )
+
 
     def create(self):
 
@@ -1067,10 +1262,7 @@ class TrackFacilities:
 
         self.create_surrounding_buildings()
 
-    # ---------------------------------------------------------
-    # PIT BUILDING
-    # ---------------------------------------------------------
-
+ 
     def create_pit_building(self):
 
         position, heading, _, _ = self.get_track_frame(
@@ -1083,6 +1275,9 @@ class TrackFacilities:
             "yas_marina_pit_building",
             position,
             heading,
+            footprint=self.footprint_polygon(
+                position, heading, -80, 80, -20, 20
+            ),
         )
 
         self.make_box(
@@ -1140,9 +1335,6 @@ class TrackFacilities:
                 (0.15, 0.35, 0.48),
             )
 
-    # ---------------------------------------------------------
-    # PADDOCK
-    # ---------------------------------------------------------
 
     def create_paddock(self):
 
@@ -1156,6 +1348,9 @@ class TrackFacilities:
             "yas_marina_paddock",
             position,
             heading,
+            footprint=self.footprint_polygon(
+                position, heading, -90, 90, -45, 45
+            ),
         )
 
         self.make_box(
@@ -1194,27 +1389,30 @@ class TrackFacilities:
                 (0.12, 0.13, 0.15),
             )
 
-    # ---------------------------------------------------------
-    # W ABU DHABI HOTEL
-    # ---------------------------------------------------------
 
     def create_hotel(self):
 
-        position, heading, _, _ = self.find_safe_site(
+        site = self.find_building_site(
             self.hotel_fraction,
             self.hotel_side,
-            clearance=165.0,
+            extents=(-150, 150, -70, 56),
         )
 
+        if site is None:
+            raise RuntimeError(
+                "Could not find a safe position for the hotel."
+            )
+
+        position, heading, footprint = site
+
+        # Facade (-Y side, entrance) looks toward the track.
         hotel = self.make_anchor(
             "w_abu_dhabi_hotel",
             position,
             heading,
+            footprint=footprint,
+            check_facing=True,
         )
-
-        # Rotate the complete hotel 180 degrees.
-        # Its world position remains unchanged.
-        hotel.setH(float(heading + 180.0))
 
         self.make_box(
             hotel,
@@ -1260,15 +1458,6 @@ class TrackFacilities:
 
         self.make_box(
             hotel,
-            "hotel_central_glass",
-            (0, -38, 31),
-            (135, 0.8, 17),
-            (0.10, 0.32, 0.48),
-            alpha=0.9,
-        )
-
-        self.make_box(
-            hotel,
             "hotel_central_roof",
             (0, 0, 41),
             (150, 80, 2),
@@ -1305,13 +1494,16 @@ class TrackFacilities:
                 segments=96,
             )
 
-            self.make_box(
+            # Soft additive glow around the dome.
+            self.make_ellipsoid(
                 hotel,
-                f"hotel_{name}_glass",
-                (center_x, -47, 27),
-                (130, 1.0, 17),
-                (0.08, 0.30, 0.44),
-                alpha=0.92,
+                f"hotel_{name}_halo",
+                (center_x, 0, center_z),
+                (rx * 1.035, ry * 1.035, rz * 1.035),
+                (0.15, 0.45, 1.0),
+                segments=64,
+                alpha=0.10,
+                glow=True,
             )
 
             self.create_hotel_lattice(
@@ -1324,42 +1516,53 @@ class TrackFacilities:
                 center_z,
             )
 
-        led_colors = [
-            (0.0, 0.55, 1.0),
-            (0.35, 0.1, 1.0),
-            (0.85, 0.05, 1.0),
-            (0.0, 0.8, 1.0),
-        ]
-
-        for i, color in enumerate(led_colors):
-
-            z = 19 + i * 1.2
-
-            self.make_box(
+            self.create_hotel_rings(
                 hotel,
-                f"hotel_front_led_{i}",
-                (0, -51.2, z),
+                f"hotel_{name}",
+                center_x,
+                rx,
+                ry,
+                rz,
+                center_z,
+                levels=[-0.64, -0.50, -0.36],
+            )
+
+        # Glow on all four sides of the base.
+
+        self.add_glow_volume(
+            hotel,
+            "hotel_base_glow",
+            0,
+            0,
+            270,
+            100,
+            0,
+            20,
+            [3.0, 8.0, 13.0, 19.0],
+            self.HOTEL_PALETTE,
+            offset_y=1.3,
+            offset_x=0.15,
+            overhang=2.5,
+            roof_z=22.3,
+        )
+
+        front_leds = []
+
+        for i, color in enumerate(self.HOTEL_PALETTE):
+
+            front_leds.append((
+                (0, -52.2, 19 + i * 1.2),
                 (250, 0.35, 0.45),
                 color,
-                emissive=True,
-            )
+            ))
 
-        for i in range(9):
+        self.make_glow_batch(
+            hotel,
+            "hotel_front_led",
+            front_leds,
+        )
 
-            z = 23 + i * 2
-
-            color = led_colors[
-                i % len(led_colors)
-            ]
-
-            self.make_box(
-                hotel,
-                f"hotel_central_led_{i}",
-                (0, -38.7, z),
-                (130, 0.3, 0.35),
-                color,
-                emissive=True,
-            )
+        # Entrance.
 
         self.make_box(
             hotel,
@@ -1386,13 +1589,14 @@ class TrackFacilities:
             (0.08, 0.12, 0.18),
         )
 
-        self.make_box(
+        self.make_glow_batch(
             hotel,
             "hotel_entrance_light",
-            (0, -65.7, 18),
-            (38, 0.35, 0.5),
-            (0.05, 0.75, 1.0),
-            emissive=True,
+            [(
+                (0, -65.7, 18),
+                (38, 0.35, 0.5),
+                (0.05, 0.85, 1.0),
+            )],
         )
 
         self.add_hotel_lighting(hotel)
@@ -1402,80 +1606,27 @@ class TrackFacilities:
             "W Abu Dhabi hotel created."
         )
 
-    # ---------------------------------------------------------
-    # BUILDING WINDOWS
-    # ---------------------------------------------------------
-
-    def add_building_windows(
-        self,
-        parent,
-        prefix,
-        width,
-        depth,
-        floors,
-        window_color=(0.12, 0.42, 0.65),
-        light_color=(0.75, 0.85, 1.0),
-    ):
-
-        spacing = 7.0
-
-        count = max(
-            2,
-            int(width / spacing)
-        )
-
-        for floor in range(floors):
-
-            z = 4.0 + floor * 4.5
-
-            for i in range(count):
-
-                x = (
-                    -width / 2
-                    + (i + 0.5) * width / count
-                )
-
-                self.make_box(
-                    parent,
-                    f"{prefix}_front_window_{floor}_{i}",
-                    (x, -depth / 2 - 0.08, z),
-                    (3.2, 0.16, 2.7),
-                    window_color,
-                )
-
-                if (i + floor) % 3 == 0:
-
-                    self.make_box(
-                        parent,
-                        f"{prefix}_front_light_{floor}_{i}",
-                        (x, -depth / 2 - 0.18, z),
-                        (2.2, 0.08, 1.9),
-                        light_color,
-                        emissive=True,
-                    )
-
-    # ---------------------------------------------------------
-    # YAS PLAZA HOTEL COMPLEX
-    # ---------------------------------------------------------
 
     def create_yas_plaza_complex(self):
 
-        site = self.find_additional_site(
-            base_fraction=0.36,
-            preferred_side=1,
-            clearance=105.0,
-            minimum_separation=210.0,
+        site = self.find_building_site(
+            0.36,
+            1,
+            extents=(-85, 105, -60, 36),
         )
 
         if site is None:
             return
 
-        position, heading, _, _ = site
+        position, heading, footprint = site
 
+        # Entrance side (-Y) looks toward the track.
         complex_root = self.make_anchor(
             "yas_plaza_hotel_complex",
             position,
             heading,
+            footprint=footprint,
+            check_facing=True,
         )
 
         building_data = [
@@ -1510,68 +1661,15 @@ class TrackFacilities:
 
         for data in building_data:
 
-            name = data["name"]
-            x = data["x"]
-            y = data["y"]
-            width = data["width"]
-            depth = data["depth"]
-            height = data["height"]
-
-            self.make_box(
+            self.create_glow_tower(
                 complex_root,
-                f"yas_plaza_{name}_main",
-                (x, y, height / 2),
-                (width, depth, height),
+                f"yas_plaza_{data['name']}",
+                data["x"],
+                data["y"],
+                data["width"],
+                data["depth"],
+                data["height"],
                 data["color"],
-            )
-
-            self.make_box(
-                complex_root,
-                f"yas_plaza_{name}_roof",
-                (x, y, height + 0.8),
-                (width + 3, depth + 3, 1.6),
-                (0.07, 0.10, 0.15),
-            )
-
-            self.make_box(
-                complex_root,
-                f"yas_plaza_{name}_glass",
-                (x, y - depth / 2 - 0.12, height / 2),
-                (width - 5, 0.25, height - 5),
-                (0.08, 0.27, 0.42),
-                alpha=0.95,
-            )
-
-            floors = max(
-                2,
-                int(height / 5.0)
-            )
-
-            self.add_building_windows(
-                complex_root,
-                f"yas_plaza_{name}",
-                width - 5,
-                depth,
-                floors,
-            )
-
-            self.make_box(
-                complex_root,
-                f"yas_plaza_{name}_roof_light",
-                (x, y - depth / 2 - 0.3, height + 1.8),
-                (width - 8, 0.25, 0.35),
-                (0.05, 0.65, 1.0),
-                emissive=True,
-            )
-
-            self.add_building_perimeter_lighting(
-                complex_root,
-                f"yas_plaza_{name}",
-                x,
-                y,
-                width,
-                depth,
-                height,
             )
 
         self.make_box(
@@ -1582,46 +1680,50 @@ class TrackFacilities:
             (0.17, 0.19, 0.22),
         )
 
+        entrance_lights = []
+
         for i in range(8):
 
             x = -52 + i * 19
 
-            self.make_box(
-                complex_root,
-                f"yas_plaza_entrance_light_{i}",
+            entrance_lights.append((
                 (x, -56, 1.0),
                 (5, 0.4, 0.25),
-                (0.0, 0.65, 1.0),
-                emissive=True,
-            )
+                (0.0, 0.75, 1.0),
+            ))
+
+        self.make_glow_batch(
+            complex_root,
+            "yas_plaza_entrance_lights",
+            entrance_lights,
+            halo=0.5,
+        )
 
         print(
             "[Facilities] Yas Plaza-inspired hotel "
             "complex created."
         )
 
-    # ---------------------------------------------------------
-    # MODERN ARENA
-    # ---------------------------------------------------------
 
     def create_modern_arena(self):
 
-        site = self.find_additional_site(
-            base_fraction=0.53,
-            preferred_side=-1,
-            clearance=110.0,
-            minimum_separation=220.0,
+        site = self.find_building_site(
+            0.53,
+            -1,
+            extents=(-90, 90, -72, 62),
         )
 
         if site is None:
             return
 
-        position, heading, _, _ = site
+        position, heading, footprint = site
 
         arena = self.make_anchor(
             "yas_island_modern_arena",
             position,
             heading,
+            footprint=footprint,
+            check_facing=True,
         )
 
         self.make_ellipsoid(
@@ -1745,28 +1847,26 @@ class TrackFacilities:
             "building created."
         )
 
-    # ---------------------------------------------------------
-    # YAS MALL
-    # ---------------------------------------------------------
 
     def create_shopping_complex(self):
 
-        site = self.find_additional_site(
-            base_fraction=0.14,
-            preferred_side=-1,
-            clearance=115.0,
-            minimum_separation=230.0,
+        site = self.find_building_site(
+            0.14,
+            -1,
+            extents=(-100, 100, -112, 62),
         )
 
         if site is None:
             return
 
-        position, heading, _, _ = site
+        position, heading, footprint = site
 
         mall = self.make_anchor(
             "yas_island_shopping_complex",
             position,
             heading,
+            footprint=footprint,
+            check_facing=True,
         )
 
         self.make_box(
@@ -1912,28 +2012,25 @@ class TrackFacilities:
             "shopping complex created."
         )
 
-    # ---------------------------------------------------------
-    # DISTANT CITY SKYLINE
-    # ---------------------------------------------------------
-
     def create_city_skyline(self):
 
-        site = self.find_additional_site(
-            base_fraction=0.91,
-            preferred_side=1,
-            clearance=125.0,
-            minimum_separation=240.0,
+        site = self.find_building_site(
+            0.91,
+            1,
+            extents=(-120, 140, -30, 30),
         )
 
         if site is None:
             return
 
-        position, heading, _, _ = site
+        position, heading, footprint = site
 
         skyline = self.make_anchor(
             "yas_island_city_skyline",
             position,
             heading,
+            footprint=footprint,
+            check_facing=True,
         )
 
         buildings = [
@@ -1958,84 +2055,7 @@ class TrackFacilities:
 
             x, y, width, depth, height = building_data
 
-            self.make_box(
-                skyline,
-                f"skyline_building_{i}",
-                (x, y, height / 2),
-                (width, depth, height),
-                colors[i],
-            )
-
-            self.make_box(
-                skyline,
-                f"skyline_glass_{i}",
-                (x, y - depth / 2 - 0.12, height / 2),
-                (width - 4, 0.2, height - 4),
-                (0.08, 0.25, 0.38),
-            )
-
-            self.make_box(
-                skyline,
-                f"skyline_roof_{i}",
-                (x, y, height + 0.6),
-                (width + 1, depth + 1, 1.2),
-                (0.06, 0.08, 0.12),
-            )
-
-            floors = max(
-                2,
-                int(height / 5.0)
-            )
-
-            window_count = max(
-                3,
-                int(width / 6.0)
-            )
-
-            for floor in range(floors):
-
-                z = 4 + floor * 5
-
-                for window in range(window_count):
-
-                    window_x = (
-                        x - width / 2
-                        + (window + 0.5) * width / window_count
-                    )
-
-                    if (window + floor + i) % 3 != 0:
-                        continue
-
-                    self.make_box(
-                        skyline,
-                        (
-                            f"skyline_window_{i}_"
-                            f"{floor}_{window}"
-                        ),
-                        (
-                            window_x,
-                            y - depth / 2 - 0.25,
-                            z,
-                        ),
-                        (1.8, 0.12, 2.4),
-                        (0.75, 0.82, 1.0),
-                        emissive=True,
-                    )
-
-            self.make_box(
-                skyline,
-                f"skyline_vertical_light_{i}",
-                (
-                    x - width / 2 + 1.5,
-                    y - depth / 2 - 0.25,
-                    height / 2,
-                ),
-                (0.25, 0.2, height - 4),
-                (0.0, 0.55, 0.9),
-                emissive=True,
-            )
-
-            self.add_building_perimeter_lighting(
+            self.create_glow_tower(
                 skyline,
                 f"skyline_building_{i}",
                 x,
@@ -2043,24 +2063,13 @@ class TrackFacilities:
                 width,
                 depth,
                 height,
+                colors[i],
             )
-
-        self.add_point_light(
-            skyline,
-            "skyline_blue_illumination",
-            (0, -25, 30),
-            (0.20, 0.40, 0.85),
-            attenuation=(1.0, 0.003, 0.00005),
-        )
 
         print(
             "[Facilities] Distant Yas Island-inspired "
             "city skyline created."
         )
-
-    # ---------------------------------------------------------
-    # CREATE ALL ADDITIONAL BUILDINGS
-    # ---------------------------------------------------------
 
     def create_surrounding_buildings(self):
 
@@ -2076,9 +2085,6 @@ class TrackFacilities:
             "[Facilities] Surrounding architecture pass complete."
         )
 
-    # ---------------------------------------------------------
-    # CLEANUP
-    # ---------------------------------------------------------
 
     def remove(self):
 
@@ -2089,3 +2095,4 @@ class TrackFacilities:
         )
 
         self.occupied_sites.clear()
+        self.occupied_footprints.clear()
