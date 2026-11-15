@@ -1,4 +1,3 @@
-
 import gymnasium as gym
 import numpy as np
 from gymnasium import spaces
@@ -6,7 +5,7 @@ from simulation.vehicle_controller import VehicleController
 from track.track_geometry import TrackGeometry
 from environment.reward_system import RewardSystem
 from environment.track_limits import TrackLimits
-
+from environment.lap_completion import LapCompletion
 
 class RacingEnv(gym.Env):
     metadata = {"render_modes": []}
@@ -33,6 +32,15 @@ class RacingEnv(gym.Env):
             raise ValueError("Track must contain at least two points.")
 
         self.start_index %= self.num_track_points
+        
+        # starts timing the lap
+        start_position = self.track_points[self.start_index]
+        start_nearest = self.track.get_nearest_point(start_position)
+
+        self.lap_completion = LapCompletion(
+            track_length=self.track_length,
+            start_progress=float(start_nearest["progress"]),
+        )
 
         # making sure that the environment is a closed circle, that connects all points together.
         closed_points = np.vstack([self.track_points, self.track_points[0]])
@@ -200,6 +208,7 @@ class RacingEnv(gym.Env):
         self.previous_action = np.zeros(3, dtype=np.float32)
         self.reward_system.reset()
         self.track_limits.reset()
+        self.lap_completion.reset()
 
         start_position = self.track_points[self.start_index]
 
@@ -281,8 +290,9 @@ class RacingEnv(gym.Env):
             reward -= 100.0
             terminated = True
 
-        if (not terminated and progress_delta > 0.0 and old_progress > self.track_length * 0.9 and new_progress < self.track_length * 0.1):
+        lap_completed = self.lap_completion.update( previous_progress=old_progress, current_progress=new_progress, progress_delta=progress_delta,)
 
+        if not terminated and lap_completed:
             reward += 200.0
             terminated = True
 
@@ -308,7 +318,9 @@ class RacingEnv(gym.Env):
             "step": self.current_step,
             "episode_steps": self.current_step,
             "reward_components": reward_info,
-            "environment_total_reward": float(reward)
+            "environment_total_reward": float(reward),
+            "lap_completed": lap_completed,
+            "lap_count": self.lap_completion.get_lap_count(),
         }
 
         return (observation, float(reward), terminated, truncated, info)
