@@ -14,3 +14,7 @@ crash.log
 
 # For built boxes
 *.box
+
+# Python caches
+simulation/__pycache__/
+track/__pycache__/

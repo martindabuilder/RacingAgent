@@ -1,195 +1,315 @@
 from pathlib import Path
-import numpy as np
+import csv
+import math
 
 class TrackData:
-   
     def __init__(self):
-        self.project_root = Path(__file__).resolve().parent.parent
-        self.csv_path = (
-            self.project_root
+        project_root = Path(__file__).resolve().parent.parent
+
+        self.data_dir = (
+            project_root
             / "assets"
             / "tracks"
             / "yas_marina"
-            / "yas_marina_2021_track.csv"
+            / "f1tenth"
         )
 
-        self.data = None
+        self.centerline_file = self.data_dir / "YasMarina_centerline.csv"
+        self.raceline_file = self.data_dir / "YasMarina_raceline.csv"
+        self.map_file = self.data_dir / "YasMarina_map.yaml"
+        self.map_image_file = self.data_dir / "YasMarina_map.png"
 
-        self.load_data()
-        self.validate_data()
+        self.centerline = []
+        self.raceline = []
 
-    def load_data(self):
+        self.resolution = 0.0
+        self.origin = (0.0, 0.0, 0.0)
 
-        if not self.csv_path.exists():
-            raise FileNotFoundError(
-                f"Track CSV not found: {self.csv_path}"
-            )
+        # F1TENTH data is in 1:10 scale.
+        self.scale = 10.0
 
-        self.data = np.genfromtxt(
-            self.csv_path,
-            delimiter=",",
-            names=True,
-            dtype=float,
-            encoding="utf-8"
+        self.length = 0.0
+
+    def load(self):
+        print("\nLOADING YAS MARINA TRACK DATA")
+        print("=" * 45)
+
+        self._check_files()
+
+        self.centerline = self._read_csv(
+            self.centerline_file,
+            [
+                "x_m",
+                "y_m",
+                "w_tr_right_m",
+                "w_tr_left_m"
+            ]
         )
 
-        if self.data.size == 0:
-            raise ValueError("Track CSV is empty.")
+        self.raceline = self._read_csv(
+            self.raceline_file,
+            [
+                "s_m",
+                "x_m",
+                "y_m",
+                "psi_rad",
+                "kappa_radpm",
+                "vx_mps",
+                "ax_mps2"
+            ]
+        )
 
-        print("\nTRACK DATA LOADED")
-        print("-" * 50)
-        print("File:", self.csv_path.name)
-        print("Number of points:", self.data.size)
+        self._load_map_metadata()
+        self._validate()
+        self._calculate_length()
+        self._print_report()
 
- 
-    def validate_data(self):
+        return self
 
-        required_columns = [
-            "s_m",
-            "x_m",
-            "y_m",
-            "z_m",
-            "heading_rad",
-            "curvature_1pm",
-            "width_m",
-            "left_x_m",
-            "left_y_m",
-            "right_x_m",
-            "right_y_m",
+    def _check_files(self):
+        required_files = [
+            self.centerline_file,
+            self.raceline_file,
+            self.map_file,
+            self.map_image_file
         ]
 
-        available_columns = self.data.dtype.names
-
-        missing = [
-            column
-            for column in required_columns
-            if column not in available_columns
-        ]
-
-        if missing:
-            raise ValueError(
-                f"Missing CSV columns: {missing}"
-            )
-
-        for column in required_columns:
-
-            values = self.data[column]
-
-            if not np.isfinite(values).all():
-                raise ValueError(
-                    f"Invalid values found in column: {column}"
+        for file_path in required_files:
+            if not file_path.exists():
+                raise FileNotFoundError(
+                    f"Missing track file: {file_path}"
                 )
 
-        if len(self.data) < 3:
+    @staticmethod
+    def _read_csv(file_path, expected_columns):
+        rows = []
+        header = None
+
+        with open(
+            file_path,
+            "r",
+            encoding="utf-8-sig",
+            newline=""
+        ) as file:
+
+            for raw_line in file:
+
+                line = raw_line.strip()
+
+                if not line:
+                    continue
+
+                # Ignore UUID and other comment lines,
+                # but keep the column header.
+                if line.startswith("#"):
+                    line = line[1:].strip()
+
+                # Both files may use semicolons or commas.
+                if ";" in line:
+                    delimiter = ";"
+                else:
+                    delimiter = ","
+
+                parts = next(
+                    csv.reader(
+                        [line],
+                        delimiter=delimiter
+                    )
+                )
+
+                parts = [
+                    value.replace("\u00a0", " ").strip()
+                    for value in parts
+                ]
+
+                normalized = [
+                    value.lstrip("#").strip()
+                    for value in parts
+                ]
+
+                # Find the header.
+                if all(
+                    column in normalized
+                    for column in expected_columns
+                ):
+                    header = normalized
+                    continue
+
+                if header is None:
+                    continue
+
+                # Skip Markdown separator rows.
+                if all(
+                    value and set(value) <= {"-", ":"}
+                    for value in parts
+                ):
+                    continue
+
+                # Read numeric values.
+                try:
+                    values = [
+                        float(value)
+                        for value in parts
+                    ]
+                except ValueError:
+                    continue
+
+                if len(values) != len(header):
+                    continue
+
+                rows.append(
+                    dict(zip(header, values))
+                )
+
+        if header is None:
             raise ValueError(
-                "Track requires at least 3 points."
+                f"Could not find expected columns in {file_path.name}. "
+                f"Expected: {expected_columns}"
             )
 
-        if np.any(self.data["width_m"] <= 0):
+        if not rows:
             raise ValueError(
-                "Track width must be positive."
+                f"No valid data rows in {file_path.name}"
             )
 
-        if np.any(np.diff(self.data["s_m"]) <= 0):
-            raise ValueError(
-                "Track distance values must increase."
+        return rows
+
+    def _load_map_metadata(self):
+        metadata = {}
+
+        with open(
+            self.map_file,
+            "r",
+            encoding="utf-8"
+        ) as file:
+
+            for line in file:
+                line = line.strip()
+
+                if not line or line.startswith("#"):
+                    continue
+
+                if ":" not in line:
+                    continue
+
+                key, value = line.split(":", 1)
+                metadata[key.strip()] = value.strip()
+
+        if "resolution" not in metadata:
+            raise ValueError("Map resolution is missing.")
+
+        if "origin" not in metadata:
+            raise ValueError("Map origin is missing.")
+
+        self.resolution = float(metadata["resolution"])
+
+        self.origin = tuple(
+            float(value.strip())
+            for value in metadata["origin"].strip("[]").split(",")
+        )
+
+    def _validate(self):
+        if len(self.centerline) < 3:
+            raise ValueError("Centerline needs at least 3 points.")
+
+        if len(self.raceline) < 3:
+            raise ValueError("Raceline needs at least 3 points.")
+
+        for point in self.centerline:
+            if point["w_tr_right_m"] <= 0:
+                raise ValueError("Invalid right track width.")
+
+            if point["w_tr_left_m"] <= 0:
+                raise ValueError("Invalid left track width.")
+
+        for point in self.raceline:
+            if point["vx_mps"] < 0:
+                raise ValueError("Invalid raceline speed.")
+
+        if self.resolution <= 0:
+            raise ValueError("Invalid map resolution.")
+
+        if len(self.origin) != 3:
+            raise ValueError("Invalid map origin.")
+
+    def _calculate_length(self):
+        total = 0.0
+
+        for i in range(len(self.centerline)):
+            current = self.centerline[i]
+            following = self.centerline[
+                (i + 1) % len(self.centerline)
+            ]
+
+            dx = following["x_m"] - current["x_m"]
+            dy = following["y_m"] - current["y_m"]
+
+            total += math.hypot(dx, dy)
+
+        self.length = total * self.scale
+
+    def get_centerline(self):
+        return [
+            (
+                point["x_m"] * self.scale,
+                point["y_m"] * self.scale,
+                0.0
             )
+            for point in self.centerline
+        ]
 
-        print("Data validation: PASSED")
+    def get_raceline(self):
+        return [
+            (
+                point["x_m"] * self.scale,
+                point["y_m"] * self.scale,
+                0.0
+            )
+            for point in self.raceline
+        ]
 
-    @property
-    def centerline(self):
+    def get_track_widths(self):
+        return [
+            (
+                point["w_tr_left_m"] * self.scale,
+                point["w_tr_right_m"] * self.scale
+            )
+            for point in self.centerline
+        ]
 
-        return np.column_stack((
-            self.data["x_m"],
-            self.data["y_m"],
-            self.data["z_m"]
-        ))
+    def _print_report(self):
+        average_left = sum(
+            point["w_tr_left_m"]
+            for point in self.centerline
+        ) / len(self.centerline)
 
-    @property
-    def left_boundary(self):
+        average_right = sum(
+            point["w_tr_right_m"]
+            for point in self.centerline
+        ) / len(self.centerline)
 
-        return np.column_stack((
-            self.data["left_x_m"],
-            self.data["left_y_m"],
-            self.data["z_m"]
-        ))
+        print("\nTRACK DATA LOADED")
+        print("-" * 45)
 
-    @property
-    def right_boundary(self):
+        print("Centerline points:", len(self.centerline))
+        print("Raceline points:", len(self.raceline))
+        print("Track length:", round(self.length, 2), "m")
 
-        return np.column_stack((
-            self.data["right_x_m"],
-            self.data["right_y_m"],
-            self.data["z_m"]
-        ))
+        print(
+            "Average left width:",
+            round(average_left * self.scale, 2),
+            "m"
+        )
 
-    @property
-    def distance(self):
-        return self.data["s_m"]
+        print(
+            "Average right width:",
+            round(average_right * self.scale, 2),
+            "m"
+        )
 
-    @property
-    def heading(self):
-        return self.data["heading_rad"]
+        print("Scale:", f"1:{int(self.scale)}")
+        print("Map resolution:", self.resolution, "m/pixel")
+        print("Map origin:", self.origin)
 
-    @property
-    def curvature(self):
-        return self.data["curvature_1pm"]
-
-    @property
-    def width(self):
-        return self.data["width_m"]
-
-    @property
-    def elevation(self):
-        return self.data["z_m"]
-
-    @property
-    def number_of_points(self):
-        return len(self.data)
-
-    @property
-    def length(self):
-        return float(self.distance[-1] - self.distance[0])
-
-    @property
-    def average_width(self):
-        return float(np.mean(self.width))
-
-    def print_summary(self):
-
-        print("\nYAS MARINA TRACK SUMMARY")
-        print("=" * 50)
-
-        print("Points:", self.number_of_points)
-        print("Length:", round(self.length, 2), "m")
-        print("Average width:", round(self.average_width, 2), "m")
-
-        print("\nCenterline:")
-        print("  First:", np.round(self.centerline[0], 3))
-        print("  Last:", np.round(self.centerline[-1], 3))
-
-        print("\nElevation:")
-        print("  Minimum:", round(float(self.elevation.min()), 3))
-        print("  Maximum:", round(float(self.elevation.max()), 3))
-
-        print("\nCurvature:")
-        print("  Minimum:", round(float(self.curvature.min()), 6))
-        print("  Maximum:", round(float(self.curvature.max()), 6))
-
-        print("\nTrack data source is provisional.")
-        print("GLB alignment has not yet been fully verified.")
-
-
-if __name__ == "__main__":
-    track = TrackData()
-    track.print_summary()
-
-    print("\nARRAY SHAPES")
-    print("-" * 50)
-    print("Centerline:", track.centerline.shape)
-    print("Left boundary:", track.left_boundary.shape)
-    print("Right boundary:", track.right_boundary.shape)
-    print("Heading:", track.heading.shape)
-    print("Curvature:", track.curvature.shape)
-    print("Width:", track.width.shape)
+        print("\nTRACK DATA READY")
+        print("=" * 45)

@@ -2,35 +2,30 @@ import numpy as np
 from track.track_data import TrackData
 
 class TrackGeometry:
-
     def __init__(self):
-        self.track_data = TrackData()
-        self.centerline_3d = self.track_data.centerline
-        self.left_boundary_3d = self.track_data.left_boundary
-        self.right_boundary_3d = self.track_data.right_boundary
+        self.track_data = TrackData().load()
+        self.centerline_3d = np.asarray(
+            self.track_data.get_centerline(),
+            dtype=float
+        )
+
         self.centerline = self.centerline_3d[:, :2]
-        self.left_boundary = self.left_boundary_3d[:, :2]
-        self.right_boundary = self.right_boundary_3d[:, :2]
-
-        self.distance = self.track_data.distance
-        self.heading = self.track_data.heading
-        self.curvature = self.track_data.curvature
-        self.width = self.track_data.width
-
-        self.width_left = np.linalg.norm(
-            self.left_boundary - self.centerline,
-            axis=1
-        )
-
-        self.width_right = np.linalg.norm(
-            self.right_boundary - self.centerline,
-            axis=1
-        )
 
         self.number_of_points = len(self.centerline)
 
-        # Create segments, including the final segment
-        # connecting the last point to the first point.
+        if self.number_of_points < 3:
+            raise ValueError(
+                "Track requires at least 3 centerline points."
+            )
+
+        widths = np.asarray(
+            self.track_data.get_track_widths(),
+            dtype=float
+        )
+
+        self.width_left = widths[:, 0]
+        self.width_right = widths[:, 1]
+        self.width = self.width_left + self.width_right
         self.segment_starts = self.centerline
 
         self.segment_ends = np.roll(
@@ -59,20 +54,135 @@ class TrackGeometry:
         )
 
         self.track_length = float(
-            self.segment_lengths.sum()
+            np.sum(self.segment_lengths)
         )
 
-        print("\nTRACK GEOMETRY INITIALIZED")
-        print("-" * 50)
-        print("Points:", self.number_of_points)
-        print("Track length:", round(self.track_length, 2), "m")
+        self.distance = np.zeros(
+            self.number_of_points,
+            dtype=float
+        )
+
+        self.distance[1:] = np.cumsum(
+            self.segment_lengths[:-1]
+        )
+
+        self.heading = self._calculate_heading()
+        self.curvature = self._calculate_curvature()
+        self.left_boundary_3d, self.right_boundary_3d = (self._calculate_boundaries())
+        self.left_boundary = self.left_boundary_3d[:, :2]
+        self.right_boundary = self.right_boundary_3d[:, :2]
+
+    def _calculate_heading(self):
+        headings = np.arctan2(
+            self.segment_directions[:, 1],
+            self.segment_directions[:, 0]
+        )
+
+        # Average incoming and outgoing directions at each point.
+        previous = np.roll(headings, 1)
+
+        angle_difference = np.arctan2(
+            np.sin(headings - previous),
+            np.cos(headings - previous)
+        )
+
+        return previous + angle_difference / 2.0
+
+    def _calculate_curvature(self):
+        directions = self.segment_directions
+
+        previous_directions = np.roll(
+            directions,
+            1,
+            axis=0
+        )
+
+        cross = (
+            previous_directions[:, 0] * directions[:, 1]
+            - previous_directions[:, 1] * directions[:, 0]
+        )
+
+        dot = np.sum(
+            previous_directions * directions,
+            axis=1
+        )
+
+        angle_change = np.arctan2(cross, dot)
+
+        average_length = (
+            np.roll(self.segment_lengths, 1)
+            + self.segment_lengths
+        ) / 2.0
+
+        return angle_change / np.maximum(
+            average_length,
+            1e-8
+        )
+
+    def _calculate_boundaries(self):
+        previous_points = np.roll(
+            self.centerline,
+            1,
+            axis=0
+        )
+
+        next_points = np.roll(
+            self.centerline,
+            -1,
+            axis=0
+        )
+
+        tangents = next_points - previous_points
+
+        tangent_lengths = np.linalg.norm(
+            tangents,
+            axis=1
+        )
+
+        if np.any(tangent_lengths < 1e-8):
+            raise ValueError(
+                "Cannot calculate track boundaries: invalid tangent."
+            )
+
+        tangents = tangents / tangent_lengths[:, None]
+
+        # Left normal relative to the direction of travel.
+        normals = np.column_stack((
+            -tangents[:, 1],
+            tangents[:, 0]
+        ))
+
+        left_xy = (
+            self.centerline
+            + normals * self.width_left[:, None]
+        )
+
+        right_xy = (
+            self.centerline
+            - normals * self.width_right[:, None]
+        )
+
+        left_3d = np.column_stack((
+            left_xy,
+            self.centerline_3d[:, 2]
+        ))
+
+        right_3d = np.column_stack((
+            right_xy,
+            self.centerline_3d[:, 2]
+        ))
+
+        return left_3d, right_3d
 
     def get_track_length(self):
         return self.track_length
 
     def get_heading(self, index):
         index = int(index) % self.number_of_points
-        return float(np.degrees(self.heading[index]))
+
+        return float(
+            np.degrees(self.heading[index])
+        )
 
     def get_curvature(self, index):
         index = int(index) % self.number_of_points
@@ -82,16 +192,23 @@ class TrackGeometry:
         index = int(index) % self.number_of_points
         return float(self.width[index])
 
-
     def get_nearest_point(self, position):
-        position = np.asarray(position, dtype=float)
+        position = np.asarray(
+            position,
+            dtype=float
+        )
+
         if position.size < 2:
-            raise ValueError("Position must contain at least X and Y.")
+            raise ValueError(
+                "Position must contain at least X and Y."
+            )
 
         position = position[:2]
 
         if not np.isfinite(position).all():
-            raise ValueError("Position contains invalid coordinates.")
+            raise ValueError(
+                "Position contains invalid coordinates."
+            )
 
         relative = position - self.segment_starts
 
@@ -100,7 +217,11 @@ class TrackGeometry:
             axis=1
         ) / (self.segment_lengths ** 2)
 
-        projection = np.clip(projection, 0.0, 1.0)
+        projection = np.clip(
+            projection,
+            0.0,
+            1.0
+        )
 
         projected_points = (
             self.segment_starts
@@ -114,7 +235,12 @@ class TrackGeometry:
             axis=1
         )
 
-        segment_index = int(np.argmin(distances))
+        segment_index = int(
+            np.argmin(distances)
+        )
+
+        t = float(projection[segment_index])
+
         nearest_xy = projected_points[segment_index]
         direction = self.segment_directions[segment_index]
         offset_vector = position - nearest_xy
@@ -127,32 +253,36 @@ class TrackGeometry:
         lateral_offset = float(cross_product)
 
         segment_progress = (
-            projection[segment_index]
-            * self.segment_lengths[segment_index]
+            t * self.segment_lengths[segment_index]
         )
 
         progress = (
             self.distance[segment_index]
             + segment_progress
-        )
-
-        progress %= self.track_length
+        ) % self.track_length
 
         next_index = (
             segment_index + 1
         ) % self.number_of_points
 
-        t = projection[segment_index]
-
         elevation = (
-            self.centerline_3d[segment_index, 2]
-            * (1.0 - t)
+            self.centerline_3d[segment_index, 2] * (1.0 - t)
             + self.centerline_3d[next_index, 2] * t
         )
 
         curvature = (
             self.curvature[segment_index] * (1.0 - t)
             + self.curvature[next_index] * t
+        )
+
+        width_left = (
+            self.width_left[segment_index] * (1.0 - t)
+            + self.width_left[next_index] * t
+        )
+
+        width_right = (
+            self.width_right[segment_index] * (1.0 - t)
+            + self.width_right[next_index] * t
         )
 
         heading_rad = float(
@@ -175,19 +305,20 @@ class TrackGeometry:
             "heading_rad": heading_rad,
             "heading_deg": float(np.degrees(heading_rad)),
             "curvature": float(curvature),
+            "width_left": float(width_left),
+            "width_right": float(width_right),
+            "width": float(width_left + width_right)
         }
 
     def is_within_track(self, position):
-
         nearest = self.get_nearest_point(position)
 
-        index = nearest["index"]
         offset = nearest["lateral_offset"]
 
         if offset >= 0:
-            return offset <= self.width_left[index]
+            return offset <= nearest["width_left"]
 
-        return abs(offset) <= self.width_right[index]
+        return abs(offset) <= nearest["width_right"]
 
     def get_distance_from_centerline(self, position):
         nearest = self.get_nearest_point(position)
@@ -195,60 +326,15 @@ class TrackGeometry:
 
     def get_track_position(self, position):
         nearest = self.get_nearest_point(position)
-        index = nearest["index"]
 
         return {
             **nearest,
-            "width": float(self.width[index]),
-            "width_left": float(self.width_left[index]),
-            "width_right": float(self.width_right[index]),
-            "within_track": self.is_within_track(position),
+            "within_track": self.is_within_track(position)
         }
 
 
 if __name__ == "__main__":
     track = TrackGeometry()
-    print("\n" + "=" * 55)
-    print("YAS MARINA TRACK GEOMETRY TEST")
-    print("=" * 55)
-
-    print("\nTRACK INFORMATION")
-    print("Number of points:", track.number_of_points)
-
-    print(
-        "Track length:",
-        round(track.get_track_length(), 2),
-        "m"
-    )
-
-    print("\nFIRST TRACK POINT")
-    print("Center:", track.centerline[0])
-    print("Left:", track.left_boundary[0])
-    print("Right:", track.right_boundary[0])
-
     test_position = track.centerline[0]
-
     result = track.get_track_position(test_position)
-
-    print("\nVEHICLE POSITION TEST")
-    print("Test position:", test_position)
-    print("Nearest point:", np.round(result["point"], 3))
-    print("Distance:", round(result["distance"], 4), "m")
-    print("Lateral offset:", round(result["lateral_offset"], 4), "m")
-    print("Progress:", round(result["progress"], 3), "m")
-    print("Heading:", round(result["heading_deg"], 3), "degrees")
-    print("Curvature:", round(result["curvature"], 6))
-    print("Within track:", result["within_track"])
-
-    test_position_outside = (
-        track.centerline[0] + np.array([0.0, 30.0])
-    )
-
-    print("\nSECOND POSITION TEST")
-    print("Test position:", test_position_outside)
-    print(
-        "Within track:",
-        track.is_within_track(test_position_outside)
-    )
-
-    print("\nTRACK GEOMETRY TEST FINISHED")
+    test_position_outside = (track.centerline[0] + np.array([0.0, 30.0]))

@@ -1,6 +1,4 @@
 # RacingAgent
 Intelligent Agent project for university
 
-[Link to the 3D model of the legendary AMG W11](https://sketchfab.com/3d-models/2020-f1-mercedes-benz-w11-6c0e669402c34133b4b516f4ca2ba9e4)
-[Database with all the track lines and boundaries](https://github.com/TUMFTM/racetrack-database/tree/master)
-[Yas Marina Circuit 3D model](https://sketchfab.com/3d-models/yas-marina-circuit-abu-dhabi-2021-layout-c41b4e19912b4d79886bcd8d7d2536af#download)
+[track infromation](https://github.com/f1tenth/f1tenth_racetracks/tree/main)
