@@ -1,8 +1,11 @@
+
 import gymnasium as gym
 import numpy as np
 from gymnasium import spaces
 from simulation.vehicle_controller import VehicleController
 from track.track_geometry import TrackGeometry
+from environment.reward_system import RewardSystem
+from environment.track_limits import TrackLimits
 
 
 class RacingEnv(gym.Env):
@@ -44,6 +47,13 @@ class RacingEnv(gym.Env):
 
         # creating the W11 and its controller with the built-in actions
         self.controller = VehicleController()
+
+        # adding the reward system
+        self.reward_system = RewardSystem(dt=self.dt)
+
+        # adding the track limits system
+        self.track_limits = TrackLimits(track=self.track, dt=self.dt, ground_margin=150.0)
+
         self.state = None
         self.previous_action = np.zeros(3, dtype=np.float32)
         self.previous_progress = 0.0
@@ -110,7 +120,7 @@ class RacingEnv(gym.Env):
 
         return float(forward), float(lateral)
 
-    # combines all the information from the 19 parameters 
+    # combines all the information from the 19 parameters
     def _get_observation(self):
         nearest = self._get_nearest_track_point()
         speed = float(self.state["speed"])
@@ -177,39 +187,19 @@ class RacingEnv(gym.Env):
 
         return float(delta)
 
-   
     def _is_within_track(self):
-        position = self._get_position()
-        return bool(self.track.is_within_track(position))
+        tire_positions = self.track_limits._get_tire_positions(self.state)
+        tires_outside = self.track_limits._check_track_limits(tire_positions)
 
-    # takes into account all the rules we have for the agent
-    # i.e penalties and rewards for 
-    def _calculate_reward(self, progress_delta, nearest, previous_action, current_action):
-        reward = 0.0
-        reward += (progress_delta * 0.1)
-        reward -= (abs(float(self.state["lateral_speed"])) * 0.01)
+        return len(tires_outside) == 0
 
-        steering_change = abs(float(current_action[0]) - float(previous_action[0]))
-        reward -= (steering_change * 0.05)
-
-        lateral_offset = abs(float(nearest["lateral_offset"]))
-        available_width = min(float(nearest["width_left"]), float(nearest["width_right"]))
-
-        if available_width > 0.0:
-
-            edge_ratio = (lateral_offset / available_width)
-
-            if edge_ratio > 0.7:
-                reward -= (edge_ratio - 0.7) * 0.5
-
-        return float(reward)
-
-   
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
 
         self.current_step = 0
         self.previous_action = np.zeros(3, dtype=np.float32)
+        self.reward_system.reset()
+        self.track_limits.reset()
 
         start_position = self.track_points[self.start_index]
 
@@ -266,13 +256,28 @@ class RacingEnv(gym.Env):
 
         observation = self._get_observation()
 
-        reward = self._calculate_reward(progress_delta, nearest, old_action, action)
         terminated = False
         truncated = False
-        within_track = self._is_within_track()
 
-        if not within_track:
+        # checking all four tires and the boundaries of the ground plane
+        limits_info = self.track_limits.update(self.state, dt=self.dt)
 
+        within_track = limits_info["within_track"]
+
+        reward, reward_info = self.reward_system.calculate(
+            state=self.state,
+            progress_delta=progress_delta,
+            nearest=nearest,
+            previous_action=old_action,
+            current_action=action,
+            within_track=within_track,
+        )
+
+        # applying track limits penalty
+        reward -= limits_info["penalty"]
+
+        # leaving the complete ground plane terminates the episode
+        if limits_info["map_exited"]:
             reward -= 100.0
             terminated = True
 
@@ -294,8 +299,16 @@ class RacingEnv(gym.Env):
             "lateral_speed": float(self.state["lateral_speed"]),
             "lateral_offset": float(nearest["lateral_offset"]),
             "within_track": within_track,
+            "tires_outside": limits_info["tires_outside"],
+            "tire_count_outside": limits_info["tire_count_outside"],
+            "violation_duration": limits_info["violation_duration"],
+            "violation_category": limits_info["violation_category"],
+            "track_limit_penalty": limits_info["penalty"],
+            "map_exited": limits_info["map_exited"],
             "step": self.current_step,
-            "episode_steps": self.current_step
+            "episode_steps": self.current_step,
+            "reward_components": reward_info,
+            "environment_total_reward": float(reward)
         }
 
         return (observation, float(reward), terminated, truncated, info)
