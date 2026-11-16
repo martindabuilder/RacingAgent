@@ -20,3 +20,4 @@ simulation/__pycache__/
 track/__pycache__/
 environment/__pycache__/
 training/__pycache__/
+tests/__pycache__/
