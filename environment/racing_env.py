@@ -21,6 +21,7 @@ class RacingEnv(gym.Env):
         start_index=1,
         track=None,
         track_name="yas_marina",
+        track_names=None,
     ):
         super().__init__()
 
@@ -28,28 +29,58 @@ class RacingEnv(gym.Env):
         self.max_episode_steps = int(max_episode_steps)
 
         self.start_speed = float(start_speed)
-        self.start_index = int(start_index)
+        self.requested_start_index = int(start_index)
 
         self.current_step = 0
         self.total_steps = 0
 
-        # Load the selected track.
-        # Yas Marina is used by default.
-        if track is None:
-            self.track = TrackLoader.load(track_name)
-            self.track_name = track_name
+        # Load and cache the available tracks.
+        self.track_cache = {}
+
+        if track is not None:
+            if track_names is not None:
+                raise ValueError("Use either track or track_names, not both.")
+
+            self.track_cache[track_name] = track
+            self.track_names = [track_name]
+
         else:
-            self.track = track
-            self.track_name = track_name
+            if track_names is None:
+                track_names = [track_name]
 
-        self.track_points = np.asarray(
-            self.track.centerline,
-            dtype=np.float64
-        )
+            self.track_names = list(track_names)
 
-        self.track_length = float(
-            self.track.get_track_length()
-        )
+            if not self.track_names:
+                raise ValueError("At least one track must be provided.")
+
+            if len(self.track_names) != len(set(self.track_names)):
+                raise ValueError("Track names must be unique.")
+
+            for name in self.track_names:
+                self.track_cache[name] = TrackLoader.load(name)
+
+        self.randomize_tracks = len(self.track_names) > 1
+
+        self._set_track(self.track_names[0])
+        self.controller = VehicleController()
+        self.reward_system = RewardSystem(dt=self.dt)
+        self.state = None
+        self.previous_action = np.zeros(3, dtype=np.float32)
+        self.previous_progress = 0.0
+        self.current_progress = 0.0
+        self.action_space = spaces.Box(low=np.array([-1.0, 0.0, 0.0], dtype=np.float32), high=np.array([1.0, 1.0, 1.0], dtype=np.float32), dtype=np.float32)
+        self.observation_space = spaces.Box(low=-1.0, high=1.0, shape=(19,), dtype=np.float32)
+
+    # Configure the selected track.
+    def _set_track(self, track_name):
+        if track_name not in self.track_cache:
+            raise ValueError(f"Track '{track_name}' is not loaded. Available tracks: {self.track_names}")
+
+        self.track_name = track_name
+        self.track = self.track_cache[track_name]
+
+        self.track_points = np.asarray(self.track.centerline, dtype=np.float64)
+        self.track_length = float(self.track.get_track_length())
 
         self.num_track_points = len(self.track_points)
 
@@ -58,16 +89,7 @@ class RacingEnv(gym.Env):
                 "Track must contain at least two points."
             )
 
-        self.start_index %= self.num_track_points
-
-        # Initialize lap completion.
-        start_position = self.track_points[self.start_index]
-        start_nearest = self.track.get_nearest_point(start_position)
-
-        self.lap_completion = LapCompletion(
-            track_length=self.track_length,
-            start_progress=float(start_nearest["progress"]),
-        )
+        self.start_index = (self.requested_start_index % self.num_track_points)
 
         # Close the centerline by connecting the last point
         # to the first point.
@@ -97,62 +119,23 @@ class RacingEnv(gym.Env):
                 "Centerline length must be positive."
             )
 
-        # Vehicle and controller.
-        self.controller = VehicleController()
+        # Initialize lap completion.
+        start_position = self.track_points[self.start_index]
 
-        # Reward system.
-        self.reward_system = RewardSystem(dt=self.dt)
+        start_nearest = self.track.get_nearest_point(
+            start_position
+        )
 
-        # Track limits system.
+        self.lap_completion = LapCompletion(
+            track_length=self.track_length,
+            start_progress=float(start_nearest["progress"]),
+        )
+
+        # Initialize track limits.
         self.track_limits = TrackLimits(
             track=self.track,
             dt=self.dt,
             ground_margin=150.0
-        )
-
-        self.state = None
-
-        self.previous_action = np.zeros(
-            3,
-            dtype=np.float32
-        )
-
-        self.previous_progress = 0.0
-        self.current_progress = 0.0
-
-        # Actions: [steering, throttle, brake]
-        self.action_space = spaces.Box(
-            low=np.array(
-                [-1.0, 0.0, 0.0],
-                dtype=np.float32
-            ),
-            high=np.array(
-                [1.0, 1.0, 1.0],
-                dtype=np.float32
-            ),
-            dtype=np.float32
-        )
-
-        # Observation space: 19 parameters.
-        #
-        # 0: speed
-        # 1: lateral speed
-        # 2: yaw rate
-        # 3: lateral offset
-        # 4: heading error
-        # 5: acceleration
-        # 6: lateral acceleration
-        # 7: steering angle
-        # 8-15: lookahead values at 5, 10, 20 and 40 metres
-        # 16: track curvature
-        # 17: left track width
-        # 18: right track width
-
-        self.observation_space = spaces.Box(
-            low=-1.0,
-            high=1.0,
-            shape=(19,),
-            dtype=np.float32
         )
 
     def _get_position(self):
@@ -327,11 +310,7 @@ class RacingEnv(gym.Env):
 
         return observation
 
-    def _calculate_progress_delta(
-        self,
-        previous,
-        current
-    ):
+    def _calculate_progress_delta(self, previous, current):
         delta = current - previous
 
         half_length = self.track_length / 2.0
@@ -345,18 +324,34 @@ class RacingEnv(gym.Env):
         return float(delta)
 
     def _is_within_track(self):
-        tire_positions = (
-            self.track_limits._get_tire_positions(self.state)
-        )
-
-        tires_outside = (
-            self.track_limits._check_track_limits(tire_positions)
-        )
+        tire_positions = (self.track_limits._get_tire_positions(self.state))
+        tires_outside = (self.track_limits._check_track_limits(tire_positions))
 
         return len(tires_outside) == 0
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
+
+        options = options or {}
+
+        # Select a track for the new episode.
+        requested_track = options.get("track_name")
+
+        if requested_track is not None:
+            if requested_track not in self.track_cache:
+                raise ValueError(f"Track '{requested_track}' is not available. Available tracks: {self.track_names}")
+
+            selected_track = requested_track
+
+        elif self.randomize_tracks:
+            selected_track = self.np_random.choice(self.track_names)
+
+        else:
+            selected_track = self.track_names[0]
+
+        # Update track-dependent systems if necessary.
+        if selected_track != self.track_name:
+            self._set_track(selected_track)
 
         self.current_step = 0
 

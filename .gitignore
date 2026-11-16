@@ -24,3 +24,5 @@ tests
 tracks/yas_marina/__pycache__/
 tracks/hockenheim/__pycache__/
 /__pycache__/
+/training/models
+/training/logs

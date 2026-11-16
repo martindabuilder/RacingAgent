@@ -1,8 +1,10 @@
+from pathlib import Path
 from direct.showbase.ShowBase import ShowBase
 from direct.filter.CommonFilters import CommonFilters
-from panda3d.core import (WindowProperties, AmbientLight, DirectionalLight, Vec4,)
+from panda3d.core import (WindowProperties, AmbientLight, DirectionalLight, Vec4, ClockObject)
 from simulation.vehicle import F1Vehicle
 from environment.track_loader import TrackLoader
+from environment.racing_env import RacingEnv
 from tracks.yas_marina.track_mesh import TrackMesh
 from tracks.yas_marina.track_environment import TrackEnvironment
 from tracks.yas_marina.track_barriers import TrackBarriers
@@ -10,6 +12,18 @@ from tracks.yas_marina.track_grandstands import TrackGrandstands
 from tracks.yas_marina.track_lighting import TrackLighting
 from tracks.yas_marina.track_facilities import TrackFacilities
 from tracks.yas_marina.track_markings import TrackMarkings
+
+
+PROJECT_DIR = Path(__file__).resolve().parent
+MODEL_PATH = (
+    PROJECT_DIR
+    / "training"
+    / "models"
+    / "ppo_racing_agent.zip"
+)
+
+SIMULATION_DT = 1.0 / 120.0
+MAX_STEPS_PER_FRAME = 8
 
 
 class YasMarinaSimulator(ShowBase):
@@ -171,6 +185,85 @@ class YasMarinaSimulator(ShowBase):
                 error
             )
 
+
+        # Load trained PPO model.
+        from stable_baselines3 import PPO
+        if not MODEL_PATH.exists():
+            raise FileNotFoundError(f"Trained model not found: {MODEL_PATH}")
+
+        self.model = PPO.load(str(MODEL_PATH), device="auto")
+        print("[PPO] Trained model loaded successfully.")
+
+        # Create racing environment.
+        self.env = RacingEnv(track=self.track, max_episode_steps=12000, start_speed=0.0)
+        self.observation, self.info = self.env.reset()
+
+        # Initialize simulation variables.
+        self.simulation_accumulator = 0.0
+
+        self.total_reward = 0.0
+        self.total_steps = 0
+        self.completed_laps = 0
+
+        self.update_vehicle_visuals()
+
+        # Start autonomous driving.
+        self.taskMgr.add(self.update_agent, "update_agent")
+
+        print("[PPO] Autonomous driving started.")
+
+    def update_vehicle_visuals(self):
+        state = self.env.controller.get_state()
+        self.vehicle.set_position(state["x"], state["y"], 0.2)
+        self.vehicle.set_rotation(state["heading_deg"])
+        self.vehicle.set_speed(state["speed"])
+
+    def reset_agent(self):
+        self.observation, self.info = self.env.reset()
+        self.total_reward = 0.0
+        self.update_vehicle_visuals()
+
+    def update_agent(self, task):
+        frame_dt = ClockObject.getGlobalClock().getDt()
+        frame_dt = min(frame_dt, 0.1)
+
+        self.simulation_accumulator += frame_dt
+
+        steps_this_frame = 0
+
+        while (self.simulation_accumulator >= SIMULATION_DT and steps_this_frame < MAX_STEPS_PER_FRAME):
+
+            # Get action from PPO model.
+            action, _ = self.model.predict(self.observation, deterministic=True)
+
+            # Update racing environment.
+            (self.observation, reward, terminated, truncated, info) = self.env.step(action)
+
+            self.total_reward += float(reward)
+            self.total_steps += 1
+            self.simulation_accumulator -= SIMULATION_DT
+
+            steps_this_frame += 1
+
+            # Update 3D vehicle position and rotation.
+            self.update_vehicle_visuals()
+                if self.total_steps % 120 == 0:
+
+                state = self.env.controller.get_state()
+
+                print(f"[PPO] Speed: {state['speed']:.2f} m/s | Position: ({state['x']:.2f}, {state['y']:.2f})")
+
+            # Check episode completion.
+            if terminated or truncated:
+
+                if info.get("lap_completed", False):
+                    self.completed_laps += 1
+                    print(f"[PPO] Lap completed: {self.completed_laps}")
+
+                print(f"[PPO] Episode finished | Steps: {self.total_steps} | Reward: {self.total_reward:.2f}")
+                self.reset_agent()
+
+        return task.cont
 
 if __name__ == "__main__":
     simulator = YasMarinaSimulator()
