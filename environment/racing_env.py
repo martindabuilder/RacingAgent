@@ -10,7 +10,7 @@ from environment.lap_completion import LapCompletion
 class RacingEnv(gym.Env):
     metadata = {"render_modes": []}
 
-    def __init__(self, dt=1.0 / 120.0, max_episode_steps=12000, start_speed=0.0, start_index=1):
+    def __init__(self, dt=1.0 / 120.0, max_episode_steps=12000, start_speed=0.0, start_index=1, track=None):
         super().__init__()
 
         self.dt = float(dt)
@@ -22,8 +22,12 @@ class RacingEnv(gym.Env):
         self.current_step = 0
         self.total_steps = 0
 
-        # loading the Yas Marina track
-        self.track = TrackGeometry()
+        # loading the selected track
+        if track is None:
+            self.track = TrackGeometry()
+        else:
+            self.track = track
+
         self.track_points = np.asarray(self.track.centerline, dtype=np.float64)
         self.track_length = float(self.track.get_track_length())
         self.num_track_points = len(self.track_points)
@@ -32,7 +36,7 @@ class RacingEnv(gym.Env):
             raise ValueError("Track must contain at least two points.")
 
         self.start_index %= self.num_track_points
-        
+
         # starts timing the lap
         start_position = self.track_points[self.start_index]
         start_nearest = self.track.get_nearest_point(start_position)
@@ -84,7 +88,7 @@ class RacingEnv(gym.Env):
         # 6 - lateral acceleration
         # 7 - steering angle for the front wheels
         # 8 to 15 include lookahead values: 5.0/10.0/20.0/40.0
-        # 16 to 18 are track curviture, left and right width of the track
+        # 16 to 18 are track curvature, left and right width of the track
         self.observation_space = spaces.Box(low=-1.0, high=1.0, shape=(19,), dtype=np.float32)
 
     def _get_position(self):
@@ -110,21 +114,21 @@ class RacingEnv(gym.Env):
 
         fraction = (progress - segment_start) / segment_length
         next_index = (index + 1) % self.num_track_points
-        point = (self.track_points[index]+ fraction * (self.track_points[next_index] - self.track_points[index]))
+        point = (self.track_points[index] + fraction * (self.track_points[next_index] - self.track_points[index]))
 
         return point
 
     def _get_relative_lookahead(self, nearest, lookahead_distance):
-        target_progress = (float(nearest["progress"]) + float(lookahead_distance))
+        target_progress = float(nearest["progress"]) + float(lookahead_distance)
         target_point = self._get_centerline_point_at_progress(target_progress)
         vehicle_position = self._get_position()
 
-        dx = (target_point[0] - vehicle_position[0])
-        dy = (target_point[1] - vehicle_position[1])
+        dx = target_point[0] - vehicle_position[0]
+        dy = target_point[1] - vehicle_position[1]
 
         heading = float(self.state["heading"])
-        forward = (np.cos(heading) * dx + np.sin(heading) * dy)
-        lateral = (-np.sin(heading) * dx + np.cos(heading) * dy)
+        forward = np.cos(heading) * dx + np.sin(heading) * dy
+        lateral = -np.sin(heading) * dx + np.cos(heading) * dy
 
         return float(forward), float(lateral)
 
@@ -149,9 +153,9 @@ class RacingEnv(gym.Env):
 
         for distance in lookahead_distances:
             forward, lateral = self._get_relative_lookahead(nearest, distance)
-            normalized_forward = (forward / distance)
+            normalized_forward = forward / distance
 
-            normalized_lateral = (lateral / max(width_left, width_right, 1.0))
+            normalized_lateral = lateral / max(width_left, width_right, 1.0)
             lookahead_values.extend([normalized_forward, normalized_lateral])
 
         curvature = float(nearest["curvature"])
@@ -213,7 +217,7 @@ class RacingEnv(gym.Env):
         start_position = self.track_points[self.start_index]
 
         next_index = (self.start_index + 1) % self.num_track_points
-        direction = (self.track_points[next_index] - start_position)
+        direction = self.track_points[next_index] - start_position
         heading = float(np.arctan2(direction[1], direction[0]))
 
         self.state = self.controller.reset(
@@ -226,7 +230,7 @@ class RacingEnv(gym.Env):
         nearest = self._get_nearest_track_point()
 
         self.current_progress = float(nearest["progress"])
-        self.previous_progress = (self.current_progress)
+        self.previous_progress = self.current_progress
 
         observation = self._get_observation()
 
@@ -251,7 +255,6 @@ class RacingEnv(gym.Env):
             raise ValueError(f"Expected action shape (3,), got {action.shape}")
 
         action = np.nan_to_num(action, nan=0.0, posinf=1.0, neginf=-1.0)
-
         action = np.clip(action, self.action_space.low, self.action_space.high)
         old_action = self.previous_action.copy()
         old_progress = self.previous_progress
@@ -290,7 +293,11 @@ class RacingEnv(gym.Env):
             reward -= 100.0
             terminated = True
 
-        lap_completed = self.lap_completion.update( previous_progress=old_progress, current_progress=new_progress, progress_delta=progress_delta,)
+        lap_completed = self.lap_completion.update(
+            previous_progress=old_progress,
+            current_progress=new_progress,
+            progress_delta=progress_delta,
+        )
 
         if not terminated and lap_completed:
             reward += 200.0
@@ -323,7 +330,7 @@ class RacingEnv(gym.Env):
             "lap_count": self.lap_completion.get_lap_count(),
         }
 
-        return (observation, float(reward), terminated, truncated, info)
+        return observation, float(reward), terminated, truncated, info
 
     def close(self):
         pass

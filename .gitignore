@@ -20,5 +20,7 @@ simulation/__pycache__/
 track/__pycache__/
 environment/__pycache__/
 training/__pycache__/
-test
+tests
 tracks/yas_marina/__pycache__/
+tracks/hockenheim/__pycache__/
+/__pycache__/
