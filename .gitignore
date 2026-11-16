@@ -16,5 +16,9 @@ crash.log
 *.box
 
 # Python caches
-__pycache__/
-*.py[cod]
+simulation/__pycache__/
+track/__pycache__/
+environment/__pycache__/
+training/__pycache__/
+test
+tracks/yas_marina/__pycache__/
