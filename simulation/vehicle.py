@@ -1,5 +1,5 @@
 from panda3d.core import (NodePath, Vec3, Vec4, Material,MaterialAttrib)
-from tracks.yas_marina.track_geometry import TrackGeometry
+from environment.track_geometry import TrackGeometry
 
 class F1Vehicle:
     def __init__(self, render: NodePath,loader, track_geometry: TrackGeometry = None):

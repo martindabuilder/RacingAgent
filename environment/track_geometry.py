@@ -1,16 +1,23 @@
 import numpy as np
-from tracks.yas_marina.track_data import TrackData
 
 class TrackGeometry:
-    def __init__(self):
-        self.track_data = TrackData().load()
+    def __init__(self, track_data):
+        self.track_data = track_data
+
         self.centerline_3d = np.asarray(
             self.track_data.get_centerline(),
             dtype=float
         )
 
-        self.centerline = self.centerline_3d[:, :2]
+        if (
+            self.centerline_3d.ndim != 2
+            or self.centerline_3d.shape[1] != 3
+        ):
+            raise ValueError(
+                "Centerline must have shape (N, 3)."
+            )
 
+        self.centerline = self.centerline_3d[:, :2]
         self.number_of_points = len(self.centerline)
 
         if self.number_of_points < 3:
@@ -18,14 +25,30 @@ class TrackGeometry:
                 "Track requires at least 3 centerline points."
             )
 
+        if not np.all(np.isfinite(self.centerline_3d)):
+            raise ValueError(
+                "Centerline contains invalid coordinates."
+            )
+
         widths = np.asarray(
             self.track_data.get_track_widths(),
             dtype=float
         )
 
+        if widths.shape != (self.number_of_points, 2):
+            raise ValueError(
+                "Track widths must have shape (N, 2)."
+            )
+
+        if not np.all(np.isfinite(widths)) or np.any(widths <= 0.0):
+            raise ValueError(
+                "Track widths must contain positive finite values."
+            )
+
         self.width_left = widths[:, 0]
         self.width_right = widths[:, 1]
         self.width = self.width_left + self.width_right
+
         self.segment_starts = self.centerline
 
         self.segment_ends = np.roll(
@@ -68,7 +91,12 @@ class TrackGeometry:
 
         self.heading = self._calculate_heading()
         self.curvature = self._calculate_curvature()
-        self.left_boundary_3d, self.right_boundary_3d = (self._calculate_boundaries())
+
+        (
+            self.left_boundary_3d,
+            self.right_boundary_3d
+        ) = self._calculate_boundaries()
+
         self.left_boundary = self.left_boundary_3d[:, :2]
         self.right_boundary = self.right_boundary_3d[:, :2]
 
@@ -78,7 +106,6 @@ class TrackGeometry:
             self.segment_directions[:, 0]
         )
 
-        # Average incoming and outgoing directions at each point.
         previous = np.roll(headings, 1)
 
         angle_difference = np.arctan2(
@@ -146,7 +173,6 @@ class TrackGeometry:
 
         tangents = tangents / tangent_lengths[:, None]
 
-        # Left normal relative to the direction of travel.
         normals = np.column_stack((
             -tangents[:, 1],
             tangents[:, 0]
@@ -186,10 +212,12 @@ class TrackGeometry:
 
     def get_curvature(self, index):
         index = int(index) % self.number_of_points
+
         return float(self.curvature[index])
 
     def get_width(self, index):
         index = int(index) % self.number_of_points
+
         return float(self.width[index])
 
     def get_nearest_point(self, position):
@@ -322,16 +350,13 @@ class TrackGeometry:
 
     def get_distance_from_centerline(self, position):
         nearest = self.get_nearest_point(position)
+
         return nearest["distance"]
 
     def get_track_position(self, position):
         nearest = self.get_nearest_point(position)
 
-        return {**nearest, "within_track": self.is_within_track(position)}
-
-
-if __name__ == "__main__":
-    track = TrackGeometry()
-    test_position = track.centerline[0]
-    result = track.get_track_position(test_position)
-    test_position_outside = (track.centerline[0] + np.array([0.0, 30.0]))
+        return {
+            **nearest,
+            "within_track": self.is_within_track(position)
+        }
