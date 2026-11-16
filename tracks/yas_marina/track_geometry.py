@@ -1,5 +1,5 @@
 import numpy as np
-from track.track_data import TrackData
+from tracks.yas_marina.track_data import TrackData
 
 class TrackGeometry:
     def __init__(self):
@@ -327,10 +327,7 @@ class TrackGeometry:
     def get_track_position(self, position):
         nearest = self.get_nearest_point(position)
 
-        return {
-            **nearest,
-            "within_track": self.is_within_track(position)
-        }
+        return {**nearest, "within_track": self.is_within_track(position)}
 
 
 if __name__ == "__main__":

@@ -4,14 +4,13 @@ import math
 
 class TrackData:
     def __init__(self):
-        project_root = Path(__file__).resolve().parent.parent
+        project_root = Path(__file__).resolve().parent.parent.parent
 
         self.data_dir = (
             project_root
             / "assets"
             / "tracks"
             / "yas_marina"
-            / "f1tenth"
         )
 
         self.centerline_file = self.data_dir / "YasMarina_centerline.csv"

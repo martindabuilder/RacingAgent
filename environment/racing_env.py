@@ -2,7 +2,7 @@ import gymnasium as gym
 import numpy as np
 from gymnasium import spaces
 from simulation.vehicle_controller import VehicleController
-from track.track_geometry import TrackGeometry
+from tracks.yas_marina.track_geometry import TrackGeometry
 from environment.reward_system import RewardSystem
 from environment.track_limits import TrackLimits
 from environment.lap_completion import LapCompletion
