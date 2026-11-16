@@ -20,7 +20,7 @@ class F1Vehicle:
 
         self.model.reparentTo(self.car)
 
-        self.model.setScale(2.0)
+        self.model.setScale(1.6)
         self.model.setH(-270)
 
         bounds = self.model.getTightBounds(self.car)

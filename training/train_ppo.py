@@ -1,11 +1,14 @@
 from pathlib import Path
+import shutil
 import time
 from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import (BaseCallback, CheckpointCallback, CallbackList,)
 from stable_baselines3.common.monitor import Monitor
 from environment.racing_env import RacingEnv
 
-TRACK_NAMES = ["yas_marina", "hockenheim", "sochi", "sepang"]
+
+TRACK_NAMES = ["yas_marina", "hockenheim", "sochi", "sepang",]
+
 TOTAL_TIMESTEPS = 500_000
 MAX_EPISODE_STEPS = 12000
 MODEL_NAME = "ppo_racing_agent"
@@ -38,22 +41,24 @@ class TrainingProgressCallback(BaseCallback):
     def __init__(self, total_timesteps, report_frequency=10000):
         super().__init__(verbose=0)
 
-        self.total_timesteps = total_timesteps
-        self.report_frequency = report_frequency
+        self.total_timesteps = int(total_timesteps)
+        self.report_frequency = int(report_frequency)
 
         self.start_time = None
-        self.next_report = report_frequency
+        self.start_steps = 0
+        self.next_report = self.report_frequency
 
     def _on_training_start(self):
-
         self.start_time = time.perf_counter()
+        self.start_steps = self.num_timesteps
 
     def _on_step(self):
+        current_steps = self.num_timesteps - self.start_steps
 
-        current_steps = self.num_timesteps
-
-        if current_steps >= self.next_report or current_steps >= self.total_timesteps:
-
+        if (
+            current_steps >= self.next_report
+            or current_steps >= self.total_timesteps
+        ):
             elapsed = time.perf_counter() - self.start_time
 
             progress = min(
@@ -93,7 +98,6 @@ class TrainingProgressCallback(BaseCallback):
         return True
 
     def _on_training_end(self):
-
         print("\n")
 
 
@@ -108,45 +112,48 @@ def create_training_environment():
     return env
 
 
-def main():
+def load_or_create_model(env):
+    model_path = MODELS_DIR / f"{MODEL_NAME}.zip"
 
-    print("\nTraining tracks:")
-    for track_name in TRACK_NAMES:
-        print(f"- {track_name}")
+    if model_path.exists():
+        print("\nExisting PPO model found:")
+        print(model_path)
 
-    print(f"\nTotal timesteps: {TOTAL_TIMESTEPS:,}")
-    print(f"Maximum episode steps: {MAX_EPISODE_STEPS:,}")
-    print(f"Checkpoint frequency: {CHECKPOINT_FREQUENCY:,}")
+        backup_path = MODELS_DIR / f"{MODEL_NAME}_before_finetune.zip"
 
-    env = create_training_environment()
+        if not backup_path.exists():
+            shutil.copy2(
+                model_path,
+                backup_path
+            )
 
-    checkpoint_callback = CheckpointCallback(
-        save_freq=CHECKPOINT_FREQUENCY,
-        save_path=str(CHECKPOINTS_DIR),
-        name_prefix=MODEL_NAME,
-    )
+            print("\nOriginal model backup created:")
+            print(backup_path)
 
-    progress_callback = TrainingProgressCallback(
-        total_timesteps=TOTAL_TIMESTEPS,
-        report_frequency=PROGRESS_FREQUENCY,
-    )
+        print("\nLoading existing model for continued training...")
 
-    callback = CallbackList([
-        checkpoint_callback,
-        progress_callback,
-    ])
+        model = PPO.load(
+            str(model_path),
+            env=env,
+            device="auto",
+        )
+
+        return model, True
+
+    print("\nNo existing model found.")
+    print("Creating a new PPO model...")
 
     model = PPO(
         policy="MlpPolicy",
         env=env,
-        learning_rate=3e-4,
-        n_steps=2048,
+        learning_rate=2.5e-4,
+        n_steps=4096,
         batch_size=256,
         n_epochs=10,
         gamma=0.99,
         gae_lambda=0.95,
         clip_range=0.2,
-        ent_coef=0.01,
+        ent_coef=0.005,
         vf_coef=0.5,
         max_grad_norm=0.5,
 
@@ -163,27 +170,57 @@ def main():
         seed=RANDOM_SEED,
     )
 
-    print(f"\nTraining device: {model.device}")
+    return model, False
+
+
+def main():
+    print("\nTraining tracks:")
+
+    for track_name in TRACK_NAMES:
+        print(f"- {track_name}")
+
+    print(f"\nAdditional timesteps: {TOTAL_TIMESTEPS:,}, Maximum episode steps: {MAX_EPISODE_STEPS:,}, Checkpoint frequency: {CHECKPOINT_FREQUENCY:,}")
+
+    env = create_training_environment()
 
     try:
+        model, resume_training = load_or_create_model(env)
+        print(f"\nTraining device: {model.device}")
+        checkpoint_callback = CheckpointCallback(save_freq=CHECKPOINT_FREQUENCY, save_path=str(CHECKPOINTS_DIR), name_prefix=MODEL_NAME,)
+
+        progress_callback = TrainingProgressCallback(total_timesteps=TOTAL_TIMESTEPS, report_frequency=PROGRESS_FREQUENCY,)
+        callback = CallbackList([checkpoint_callback, progress_callback,])
+
+        print("\nTraining mode:")
+
+        if resume_training:
+            print("- Continuing from existing model.")
+        else:
+            print("- Training a new model.")
+
+        print(f"- Additional steps: {TOTAL_TIMESTEPS:,}")
+
         model.learn(
             total_timesteps=TOTAL_TIMESTEPS,
             callback=callback,
             tb_log_name=MODEL_NAME,
+            reset_num_timesteps=not resume_training,
         )
 
         final_model_path = MODELS_DIR / MODEL_NAME
 
         model.save(str(final_model_path))
 
-        print("\nTraining complete, final model saved to:")
+        print("\nTraining complete.")
+        print("Final model saved to:")
         print(final_model_path)
 
     except KeyboardInterrupt:
         print("\n\nTraining interrupted by user.")
         interrupted_model_path = (MODELS_DIR / f"{MODEL_NAME}_interrupted")
         model.save(str(interrupted_model_path))
-        print(f"Model saved to: {interrupted_model_path}")
+        print("\nModel saved to:")
+        print(interrupted_model_path)
 
     finally:
         env.close()

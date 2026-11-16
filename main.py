@@ -1,7 +1,9 @@
+import time
+import numpy as np
+import torch
 from pathlib import Path
 from direct.showbase.ShowBase import ShowBase
-from direct.filter.CommonFilters import CommonFilters
-from panda3d.core import (WindowProperties, AmbientLight, DirectionalLight, Vec4, ClockObject)
+from panda3d.core import (WindowProperties, AmbientLight, DirectionalLight, Vec3, Vec4, ClockObject)
 from simulation.vehicle import F1Vehicle
 from environment.track_loader import TrackLoader
 from environment.racing_env import RacingEnv
@@ -13,6 +15,7 @@ from tracks.yas_marina.track_lighting import TrackLighting
 from tracks.yas_marina.track_facilities import TrackFacilities
 from tracks.yas_marina.track_markings import TrackMarkings
 
+torch.set_num_threads(1)
 
 PROJECT_DIR = Path(__file__).resolve().parent
 MODEL_PATH = (
@@ -23,18 +26,25 @@ MODEL_PATH = (
 )
 
 SIMULATION_DT = 1.0 / 120.0
-MAX_STEPS_PER_FRAME = 8
+MAX_STEPS_PER_FRAME = 2
+MAX_FRAME_DT = 0.05
+MAX_ACCUMULATOR = SIMULATION_DT * MAX_STEPS_PER_FRAME
+
+CAMERA_DISTANCE = 10.0
+CAMERA_HEIGHT = 3.5
+CAMERA_TARGET_HEIGHT = 8.0
+CAMERA_LOOK_AHEAD = 6.0
 
 
 class YasMarinaSimulator(ShowBase):
     def __init__(self):
         super().__init__()
 
-        self.render.setShaderAuto()
+        self.setFrameRateMeter(True)
 
         properties = WindowProperties()
         properties.setTitle("F1 Autonomous Racing Simulator")
-        properties.setSize(1600, 900)
+        properties.setSize(960, 540)
 
         self.win.requestProperties(properties)
 
@@ -68,7 +78,6 @@ class YasMarinaSimulator(ShowBase):
         self.moon_light_node.setHpr(35, -55, 0)
         self.render.setLight(self.moon_light_node)
 
-        # Load track data and geometry.
         self.track = TrackLoader.load("yas_marina")
 
         self.track_mesh = TrackMesh(
@@ -107,6 +116,12 @@ class YasMarinaSimulator(ShowBase):
         )
         self.track_lighting.create()
 
+        self.facilities = TrackFacilities(
+            self.render,
+            self.track
+        )
+        self.facilities.create()
+
         self.vehicle = F1Vehicle(
             self.render,
             self.loader,
@@ -114,12 +129,6 @@ class YasMarinaSimulator(ShowBase):
         )
 
         start_position = self.track.centerline[0]
-
-        self.facilities = TrackFacilities(
-            self.render,
-            self.track
-        )
-        self.facilities.create()
 
         self.vehicle.set_position(
             float(start_position[0]),
@@ -131,131 +140,227 @@ class YasMarinaSimulator(ShowBase):
 
         self.vehicle.set_rotation(start_heading)
 
-        centerline = self.track.centerline
-
-        min_x = float(centerline[:, 0].min())
-        max_x = float(centerline[:, 0].max())
-
-        min_y = float(centerline[:, 1].min())
-        max_y = float(centerline[:, 1].max())
-
-        center_x = (min_x + max_x) / 2.0
-        center_y = (min_y + max_y) / 2.0
-
-        self.camera.setPos(
-            center_x,
-            center_y,
-            1100
-        )
-
-        self.camera.lookAt(
-            center_x,
-            center_y,
-            0
-        )
-
         self.camLens.setFov(50)
 
-        self.filters = CommonFilters(
-            self.win,
-            self.cam
+        from stable_baselines3 import PPO
+
+        if not MODEL_PATH.exists():
+            raise FileNotFoundError(
+                f"Trained model not found: {MODEL_PATH}"
+            )
+
+        print("[PPO] Loading trained model...")
+
+        self.model = PPO.load(
+            str(MODEL_PATH),
+            device="cpu"
         )
 
-        try:
-            bloom_enabled = self.filters.setBloom(
-                blend=(0.3, 0.3, 0.3, 0.0),
-                desat=0.0,
-                intensity=1.5,
-                size="medium",
-                mintrigger=0.6,
-                maxtrigger=1.0
-            )
-
-            if bloom_enabled:
-                print("[Graphics] Bloom enabled successfully.")
-            else:
-                print(
-                    "[Graphics] Bloom could not be enabled. "
-                    "Graphics hardware or shaders may not support it."
-                )
-
-        except Exception as error:
-            print(
-                "[Graphics] Bloom initialization failed:",
-                error
-            )
-
-
-        # Load trained PPO model.
-        from stable_baselines3 import PPO
-        if not MODEL_PATH.exists():
-            raise FileNotFoundError(f"Trained model not found: {MODEL_PATH}")
-
-        self.model = PPO.load(str(MODEL_PATH), device="auto")
         print("[PPO] Trained model loaded successfully.")
 
-        # Create racing environment.
-        self.env = RacingEnv(track=self.track, max_episode_steps=12000, start_speed=0.0)
+        self.env = RacingEnv(
+            track=self.track,
+            max_episode_steps=12000,
+            start_speed=0.0
+        )
+
         self.observation, self.info = self.env.reset()
 
-        # Initialize simulation variables.
         self.simulation_accumulator = 0.0
+
+        self.previous_position = None
+        self.current_position = None
+
+        self.previous_heading = 0.0
+        self.current_heading = 0.0
 
         self.total_reward = 0.0
         self.total_steps = 0
         self.completed_laps = 0
 
         self.update_vehicle_visuals()
+        self.update_camera(1.0)
 
-        # Start autonomous driving.
-        self.taskMgr.add(self.update_agent, "update_agent")
+        self.taskMgr.add(
+            self.update_agent,
+            "update_agent"
+        )
 
         print("[PPO] Autonomous driving started.")
 
-    def update_vehicle_visuals(self):
+    def predict_action(self, observation):
+
+        observation = np.asarray(
+            observation,
+            dtype=np.float32
+        )
+
+        observation_tensor = self.model.policy.obs_to_tensor(observation)[0]
+
+        with torch.inference_mode():
+            actions = self.model.policy(observation_tensor, deterministic=True)[0]
+
+        actions = actions.cpu().numpy()
+
+        if self.model.policy.squash_output:
+            actions = self.model.policy.unscale_action(actions)
+        else:
+            actions = np.clip(actions, self.model.action_space.low, self.model.action_space.high)
+
+        return actions.reshape(self.model.action_space.shape)
+
+    def get_vehicle_state(self):
+
         state = self.env.controller.get_state()
-        self.vehicle.set_position(state["x"], state["y"], 0.2)
-        self.vehicle.set_rotation(state["heading_deg"])
+
+        return (
+            float(state["x"]),
+            float(state["y"]),
+            float(state["heading_deg"])
+        )
+
+    def update_interpolation_state(self):
+
+        position_x, position_y, heading = self.get_vehicle_state()
+
+        self.previous_position = (
+            position_x,
+            position_y
+        )
+
+        self.current_position = (
+            position_x,
+            position_y
+        )
+
+        self.previous_heading = heading
+        self.current_heading = heading
+
+    def update_vehicle_visuals(self, alpha=1.0):
+        if self.previous_position is None:
+            self.update_interpolation_state()
+
+        alpha = float(np.clip(alpha, 0.0, 1.0))
+
+        x = (
+            self.previous_position[0]
+            + (self.current_position[0] - self.previous_position[0]) * alpha
+        )
+
+        y = (
+            self.previous_position[1]
+            + (self.current_position[1] - self.previous_position[1]) * alpha
+        )
+
+        heading_difference = ((self.current_heading - self.previous_heading + 180.0) % 360.0) - 180.0
+
+        heading = (self.previous_heading + heading_difference * alpha)
+        self.vehicle.set_position(x, y, 0.2)
+
+        self.vehicle.set_rotation(heading)
+        state = self.env.controller.get_state()
         self.vehicle.set_speed(state["speed"])
 
+    def update_camera(self, dt):
+
+        car_position = self.vehicle.car.getPos(self.render)
+
+        forward = self.vehicle.model.getQuat(
+            self.render
+        ).getForward()
+
+        forward.setZ(0)
+        forward = -forward
+
+        if forward.lengthSquared() > 0.000001:
+            forward.normalize()
+
+        camera_position = (
+            car_position
+            - forward * CAMERA_DISTANCE
+            + Vec3(0, 0, CAMERA_HEIGHT)
+        )
+
+        look_position = (
+            car_position
+            + forward * CAMERA_LOOK_AHEAD
+            + Vec3(0, 0, 1.0)
+        )
+
+        self.camera.setPos(
+            self.render,
+            camera_position
+        )
+
+        self.camera.lookAt(
+            self.render,
+            look_position
+        )
+
     def reset_agent(self):
+
         self.observation, self.info = self.env.reset()
+
         self.total_reward = 0.0
-        self.update_vehicle_visuals()
+
+        self.update_interpolation_state()
 
     def update_agent(self, task):
         frame_dt = ClockObject.getGlobalClock().getDt()
-        frame_dt = min(frame_dt, 0.1)
+        frame_dt = max(0.0, min(frame_dt, MAX_FRAME_DT))
 
         self.simulation_accumulator += frame_dt
 
+        if self.simulation_accumulator > MAX_ACCUMULATOR:
+            self.simulation_accumulator = MAX_ACCUMULATOR
+
         steps_this_frame = 0
 
-        while (self.simulation_accumulator >= SIMULATION_DT and steps_this_frame < MAX_STEPS_PER_FRAME):
+        while (
+            self.simulation_accumulator >= SIMULATION_DT
+            and steps_this_frame < MAX_STEPS_PER_FRAME
+        ):
 
-            # Get action from PPO model.
-            action, _ = self.model.predict(self.observation, deterministic=True)
+            self.previous_position = self.current_position
+            self.previous_heading = self.current_heading
 
-            # Update racing environment.
-            (self.observation, reward, terminated, truncated, info) = self.env.step(action)
+            action = self.predict_action(
+                self.observation
+            )
+
+            (
+                self.observation,
+                reward,
+                terminated,
+                truncated,
+                info
+            ) = self.env.step(action)
 
             self.total_reward += float(reward)
             self.total_steps += 1
+
+            state = self.env.controller.get_state()
+
+            self.current_position = (
+                float(state["x"]),
+                float(state["y"])
+            )
+
+            self.current_heading = float(
+                state["heading_deg"]
+            )
+
             self.simulation_accumulator -= SIMULATION_DT
 
             steps_this_frame += 1
 
-            # Update 3D vehicle position and rotation.
-            self.update_vehicle_visuals()
-                if self.total_steps % 120 == 0:
+            if self.total_steps % 600 == 0:
 
                 state = self.env.controller.get_state()
 
                 print(f"[PPO] Speed: {state['speed']:.2f} m/s | Position: ({state['x']:.2f}, {state['y']:.2f})")
 
-            # Check episode completion.
             if terminated or truncated:
-
                 if info.get("lap_completed", False):
                     self.completed_laps += 1
                     print(f"[PPO] Lap completed: {self.completed_laps}")
@@ -263,6 +368,9 @@ class YasMarinaSimulator(ShowBase):
                 print(f"[PPO] Episode finished | Steps: {self.total_steps} | Reward: {self.total_reward:.2f}")
                 self.reset_agent()
 
+        alpha = (self.simulation_accumulator / SIMULATION_DT)
+        self.update_vehicle_visuals(alpha)
+        self.update_camera(frame_dt)
         return task.cont
 
 if __name__ == "__main__":

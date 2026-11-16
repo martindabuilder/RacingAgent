@@ -5,3 +5,7 @@ Intelligent Agent project for university, using Panda3D for the 3D graphics and 
 [Gymnasium car racing environment](https://gymnasium.farama.org/environments/box2d/car_racing/)
 [PPO - Medium](https://medium.com/data-science-collective/ppo-explained-beginners-guide-to-proximal-policy-optimization-48b4addf923c)
 [PPO - GeeksforGeeks](https://www.geeksforgeeks.org/machine-learning/a-brief-introduction-to-proximal-policy-optimization/)
+
+Inspirations
+[Lewis Hamilton's Stunning Pole Lap | 2018 Singapore Grand Prix](https://www.youtube.com/watch?v=AI3JzYCL3K0)
+[Sebastian Vettel's Pole Lap on Home Soil | 2018 German Grand Prix](https://www.youtube.com/watch?v=Bs_LIBPTAdg)

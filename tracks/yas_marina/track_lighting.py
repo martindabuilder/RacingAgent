@@ -18,7 +18,7 @@ class TrackLighting:
         self.target_height = 0.5
 
         # Projector configuration
-        self.light_count = 40
+        self.light_count = 60
 
         self.light_color = Vec4(
             1.0,

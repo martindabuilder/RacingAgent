@@ -1,5 +1,4 @@
-﻿
-import gymnasium as gym
+﻿import gymnasium as gym
 import numpy as np
 from gymnasium import spaces
 
@@ -476,11 +475,15 @@ class RacingEnv(gym.Env):
         )
 
         # Apply track limits penalty.
-        reward -= limits_info["penalty"]
+        track_limit_penalty = float(limits_info["penalty"])
+        reward -= track_limit_penalty
 
         # Leaving the ground plane terminates the episode.
+        map_exit_penalty = 0.0
+
         if limits_info["map_exited"]:
-            reward -= 100.0
+            map_exit_penalty = 100.0
+            reward -= map_exit_penalty
             terminated = True
 
         lap_completed = self.lap_completion.update(
@@ -489,8 +492,12 @@ class RacingEnv(gym.Env):
             progress_delta=progress_delta,
         )
 
+        # Reward successful lap completion.
+        lap_completion_reward = 0.0
+
         if not terminated and lap_completed:
-            reward += 200.0
+            lap_completion_reward = 200.0
+            reward += lap_completion_reward
             terminated = True
 
         if self.current_step >= self.max_episode_steps:
@@ -498,6 +505,21 @@ class RacingEnv(gym.Env):
 
         self.previous_progress = new_progress
         self.previous_action = action.copy()
+
+        # Store the complete reward breakdown.
+        reward_info["track_limit_penalty"] = float(
+            -track_limit_penalty
+        )
+
+        reward_info["map_exit_penalty"] = float(
+            -map_exit_penalty
+        )
+
+        reward_info["lap_completion_reward"] = float(
+            lap_completion_reward
+        )
+
+        reward_info["total_reward"] = float(reward)
 
         info = {
             "track_name": self.track_name,
