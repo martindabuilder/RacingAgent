@@ -1,9 +1,10 @@
-import time
 import numpy as np
 import torch
 from pathlib import Path
 from direct.showbase.ShowBase import ShowBase
-from panda3d.core import (WindowProperties, AmbientLight, DirectionalLight, Vec3, Vec4, ClockObject)
+from direct.filter.CommonFilters import CommonFilters
+from direct.gui.OnscreenText import OnscreenText
+from panda3d.core import (WindowProperties, AmbientLight, DirectionalLight, Vec3, Vec4, ClockObject, TextNode)
 from simulation.vehicle import F1Vehicle
 from environment.track_loader import TrackLoader
 from environment.racing_env import RacingEnv
@@ -32,8 +33,8 @@ MAX_ACCUMULATOR = SIMULATION_DT * MAX_STEPS_PER_FRAME
 
 CAMERA_DISTANCE = 10.0
 CAMERA_HEIGHT = 3.5
-CAMERA_TARGET_HEIGHT = 8.0
 CAMERA_LOOK_AHEAD = 6.0
+SHADOW_MAP_SIZE = 1024
 
 
 class YasMarinaSimulator(ShowBase):
@@ -48,36 +49,75 @@ class YasMarinaSimulator(ShowBase):
 
         self.win.requestProperties(properties)
 
-        self.setBackgroundColor(
-            0.008,
-            0.015,
-            0.045,
-            1.0
+        # Night background
+        self.setBackgroundColor(0.025, 0.035, 0.060, 1.0)
+
+        # Ambient lighting
+        ambient_light = AmbientLight(
+            "night_ambient"
         )
 
-        ambient_light = AmbientLight("night_ambient")
         ambient_light.setColor(
-            Vec4(0.16, 0.19, 0.30, 1.0)
+            Vec4(
+                0.22,
+                0.24,
+                0.30,
+                1.0
+            )
         )
 
         self.ambient_light_node = (
-            self.render.attachNewNode(ambient_light)
+            self.render.attachNewNode(
+                ambient_light
+            )
         )
 
         self.render.setLight(self.ambient_light_node)
 
+        # Main directional light with dynamic shadows
         moon_light = DirectionalLight("moon_light")
-        moon_light.setColor(
-            Vec4(0.30, 0.34, 0.48, 1.0)
-        )
+        moon_light.setColor(Vec4(0.22, 0.25, 0.32,1.0))
 
-        self.moon_light_node = (
-            self.render.attachNewNode(moon_light)
-        )
+        self.moon_light_node = (self.render.attachNewNode(moon_light))
 
         self.moon_light_node.setHpr(35, -55, 0)
+
+        # Enable shadow mapping on the main light.
+        # The 64 track spotlights remain without shadows.
+        moon_light.setShadowCaster(True, SHADOW_MAP_SIZE, SHADOW_MAP_SIZE)
         self.render.setLight(self.moon_light_node)
 
+        print(f"[Graphics] Main shadow map: {SHADOW_MAP_SIZE}x{SHADOW_MAP_SIZE}")
+
+        # Bloom
+        self.filters = None
+        self.bloom_enabled = False
+
+        try:
+            self.filters = CommonFilters(
+                self.win,
+                self.cam
+            )
+
+            self.bloom_enabled = self.filters.setBloom(
+                blend=(0.10, 0.10, 0.10, 0.0),
+                desat=0.0,
+                intensity=0.5,
+                size="medium"
+            )
+
+            if self.bloom_enabled:
+                print("[Graphics] Bloom enabled.")
+
+            else:
+                print("[Graphics] Bloom is not supported.")
+
+        except Exception as error:
+            self.filters = None
+            self.bloom_enabled = False
+            print(f"[Graphics] Bloom unavailable: {error}")
+
+        # Track
         self.track = TrackLoader.load("yas_marina")
 
         self.track_mesh = TrackMesh(
@@ -86,42 +126,49 @@ class YasMarinaSimulator(ShowBase):
         )
         self.track_mesh.create()
 
+        # Environment
         self.environment = TrackEnvironment(
             self.render,
             self.track
         )
         self.environment.create()
 
+        # Barriers
         self.barriers = TrackBarriers(
             self.render,
             self.track
         )
         self.barriers.create()
 
+        # Track markings
         self.track_markings = TrackMarkings(
             self.render,
             self.track
         )
         self.track_markings.create()
 
+        # Grandstands
         self.grandstands = TrackGrandstands(
             self.track,
             self.render
         )
         self.grandstands.create()
 
+        # Track lighting
         self.track_lighting = TrackLighting(
             self.render,
             self.track
         )
         self.track_lighting.create()
 
+        # Facilities
         self.facilities = TrackFacilities(
             self.render,
             self.track
         )
         self.facilities.create()
 
+        # Vehicle
         self.vehicle = F1Vehicle(
             self.render,
             self.loader,
@@ -138,7 +185,15 @@ class YasMarinaSimulator(ShowBase):
 
         start_heading = self.track.get_heading(0)
 
-        self.vehicle.set_rotation(start_heading)
+        self.vehicle.set_rotation(
+            start_heading
+        )
+
+        # Automatic shaders for lighting and shadows
+
+        self.render.setShaderAuto()
+
+        # Camera
 
         self.camLens.setFov(50)
 
@@ -156,7 +211,9 @@ class YasMarinaSimulator(ShowBase):
             device="cpu"
         )
 
-        print("[PPO] Trained model loaded successfully.")
+        print(
+            "[PPO] Trained model loaded successfully."
+        )
 
         self.env = RacingEnv(
             track=self.track,
@@ -164,7 +221,9 @@ class YasMarinaSimulator(ShowBase):
             start_speed=0.0
         )
 
-        self.observation, self.info = self.env.reset()
+        self.observation, self.info = (
+            self.env.reset()
+        )
 
         self.simulation_accumulator = 0.0
 
@@ -177,6 +236,9 @@ class YasMarinaSimulator(ShowBase):
         self.total_reward = 0.0
         self.total_steps = 0
         self.completed_laps = 0
+        self.last_reward = 0.0
+
+        self.setup_reward_hud()
 
         self.update_vehicle_visuals()
         self.update_camera(1.0)
@@ -186,7 +248,39 @@ class YasMarinaSimulator(ShowBase):
             "update_agent"
         )
 
-        print("[PPO] Autonomous driving started.")
+        print(
+            "[PPO] Autonomous driving started."
+        )
+
+    def setup_reward_hud(self):
+
+        self.reward_hud = OnscreenText(
+            text="",
+            pos=(-1.30, 0.88),
+            scale=0.045,
+            fg=(0.35, 0.85, 1.0, 1.0),
+            align=TextNode.ALeft,
+            mayChange=True,
+            shadow=(0, 0, 0, 0.8),
+            shadowOffset=(0.04, 0.04)
+        )
+
+        self.update_reward_hud()
+
+    def update_reward_hud(self):
+
+        state = self.env.controller.get_state()
+
+        speed_kmh = state["speed"] * 3.6
+
+        self.reward_hud.setText(
+            f"F1 AUTONOMOUS RACING\n"
+            f"-------------------------\n"
+            f"REWARD:      {self.total_reward:10.2f}\n"
+            f"LAST REWARD: {self.last_reward:10.4f}\n"
+            f"SPEED:       {speed_kmh:10.1f} km/h\n"
+            f"LAPS:        {self.completed_laps:10d}"
+        )
 
     def predict_action(self, observation):
 
@@ -195,19 +289,38 @@ class YasMarinaSimulator(ShowBase):
             dtype=np.float32
         )
 
-        observation_tensor = self.model.policy.obs_to_tensor(observation)[0]
+        observation_tensor = (
+            self.model.policy.obs_to_tensor(
+                observation
+            )[0]
+        )
 
         with torch.inference_mode():
-            actions = self.model.policy(observation_tensor, deterministic=True)[0]
+
+            actions = self.model.policy(
+                observation_tensor,
+                deterministic=True
+            )[0]
 
         actions = actions.cpu().numpy()
 
         if self.model.policy.squash_output:
-            actions = self.model.policy.unscale_action(actions)
-        else:
-            actions = np.clip(actions, self.model.action_space.low, self.model.action_space.high)
 
-        return actions.reshape(self.model.action_space.shape)
+            actions = self.model.policy.unscale_action(
+                actions
+            )
+
+        else:
+
+            actions = np.clip(
+                actions,
+                self.model.action_space.low,
+                self.model.action_space.high
+            )
+
+        return actions.reshape(
+            self.model.action_space.shape
+        )
 
     def get_vehicle_state(self):
 
@@ -221,7 +334,9 @@ class YasMarinaSimulator(ShowBase):
 
     def update_interpolation_state(self):
 
-        position_x, position_y, heading = self.get_vehicle_state()
+        position_x, position_y, heading = (
+            self.get_vehicle_state()
+        )
 
         self.previous_position = (
             position_x,
@@ -244,17 +359,33 @@ class YasMarinaSimulator(ShowBase):
 
         x = (
             self.previous_position[0]
-            + (self.current_position[0] - self.previous_position[0]) * alpha
+            + (
+                self.current_position[0]
+                - self.previous_position[0]
+            ) * alpha
         )
 
         y = (
             self.previous_position[1]
-            + (self.current_position[1] - self.previous_position[1]) * alpha
+            + (
+                self.current_position[1]
+                - self.previous_position[1]
+            ) * alpha
         )
 
-        heading_difference = ((self.current_heading - self.previous_heading + 180.0) % 360.0) - 180.0
+        heading_difference = (
+            (
+                self.current_heading
+                - self.previous_heading
+                + 180.0
+            ) % 360.0
+        ) - 180.0
 
-        heading = (self.previous_heading + heading_difference * alpha)
+        heading = (
+            self.previous_heading
+            + heading_difference * alpha
+        )
+
         self.vehicle.set_position(x, y, 0.2)
 
         self.vehicle.set_rotation(heading)
@@ -263,7 +394,9 @@ class YasMarinaSimulator(ShowBase):
 
     def update_camera(self, dt):
 
-        car_position = self.vehicle.car.getPos(self.render)
+        car_position = self.vehicle.car.getPos(
+            self.render
+        )
 
         forward = self.vehicle.model.getQuat(
             self.render
@@ -298,21 +431,19 @@ class YasMarinaSimulator(ShowBase):
         )
 
     def reset_agent(self):
-
-        self.observation, self.info = self.env.reset()
-
+        self.observation, self.info = (self.env.reset())
         self.total_reward = 0.0
-
+        self.last_reward = 0.0
         self.update_interpolation_state()
 
     def update_agent(self, task):
-        frame_dt = ClockObject.getGlobalClock().getDt()
+        frame_dt = (ClockObject.getGlobalClock().getDt())
         frame_dt = max(0.0, min(frame_dt, MAX_FRAME_DT))
 
         self.simulation_accumulator += frame_dt
 
         if self.simulation_accumulator > MAX_ACCUMULATOR:
-            self.simulation_accumulator = MAX_ACCUMULATOR
+            self.simulation_accumulator = (MAX_ACCUMULATOR)
 
         steps_this_frame = 0
 
@@ -321,8 +452,8 @@ class YasMarinaSimulator(ShowBase):
             and steps_this_frame < MAX_STEPS_PER_FRAME
         ):
 
-            self.previous_position = self.current_position
-            self.previous_heading = self.current_heading
+            self.previous_position = (self.current_position)
+            self.previous_heading = (self.current_heading)
 
             action = self.predict_action(
                 self.observation
@@ -336,7 +467,8 @@ class YasMarinaSimulator(ShowBase):
                 info
             ) = self.env.step(action)
 
-            self.total_reward += float(reward)
+            self.last_reward = float(reward)
+            self.total_reward += self.last_reward
             self.total_steps += 1
 
             state = self.env.controller.get_state()
@@ -371,6 +503,7 @@ class YasMarinaSimulator(ShowBase):
         alpha = (self.simulation_accumulator / SIMULATION_DT)
         self.update_vehicle_visuals(alpha)
         self.update_camera(frame_dt)
+        self.update_reward_hud()
         return task.cont
 
 if __name__ == "__main__":

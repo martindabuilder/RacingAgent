@@ -15,13 +15,12 @@ class TrackMesh:
         self.render = render
         self.track = track
         self.road = None
-
         self.road_height = 0.04
 
         self.road_color = (
-            0.105,
-            0.11,
-            0.12,
+            0.24,
+            0.25,
+            0.27,
             1.0
         )
 
@@ -41,10 +40,11 @@ class TrackMesh:
                 "Track boundaries must contain at least 3 matching points."
             )
 
-        vertex_format = GeomVertexFormat.getV3c4t2()
+        vertex_format = GeomVertexFormat.getV3n3c4t2()
         vertex_data = GeomVertexData("yas_marina_road", vertex_format, Geom.UHStatic)
         vertex_data.setNumRows(point_count * 2)
         vertex_writer = GeomVertexWriter(vertex_data, "vertex")
+        normal_writer = GeomVertexWriter(vertex_data, "normal")
         color_writer = GeomVertexWriter(vertex_data, "color")
         texcoord_writer = GeomVertexWriter(vertex_data, "texcoord")
 
@@ -59,14 +59,9 @@ class TrackMesh:
                 float(left_z + self.road_height)
             )
 
-            color_writer.addData4f(
-                *self.road_color
-            )
-
-            texcoord_writer.addData2f(
-                0.0,
-                i / 10.0
-            )
+            normal_writer.addData3f(0.0, 0.0, 1.0)
+            color_writer.addData4f(*self.road_color)
+            texcoord_writer.addData2f(0.0, i / 10.0)
 
             vertex_writer.addData3f(
                 float(right_x),
@@ -74,14 +69,9 @@ class TrackMesh:
                 float(right_z + self.road_height)
             )
 
-            color_writer.addData4f(
-                *self.road_color
-            )
-
-            texcoord_writer.addData2f(
-                1.0,
-                i / 10.0
-            )
+            normal_writer.addData3f(0.0, 0.0, 1.0)
+            color_writer.addData4f(*self.road_color)
+            texcoord_writer.addData2f(1.0, i / 10.0)
 
         triangles = GeomTriangles(Geom.UHStatic)
 
@@ -117,14 +107,14 @@ class TrackMesh:
 
         self.road = self.render.attachNewNode(node)
         self.road.setTwoSided(True)
-        self.road.clearLight()
 
         material = Material()
         material.setName("yas_marina_asphalt")
-        material.setDiffuse((0.16, 0.17, 0.19, 1.0))
-        material.setAmbient((0.025, 0.028, 0.035, 1.0))
-        material.setSpecular((0.08, 0.08, 0.09, 1.0))
-        material.setShininess(24.0)
+        material.setDiffuse((0.42, 0.43, 0.45, 1.0))
+        material.setAmbient((0.12, 0.13, 0.15, 1.0))
+        material.setSpecular((0.12, 0.13, 0.15, 1.0))
+
+        material.setShininess(28.0)
 
         self.road.setMaterial(material, 1)
 

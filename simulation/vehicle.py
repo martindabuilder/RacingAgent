@@ -1,8 +1,8 @@
-from panda3d.core import (NodePath, Vec3, Vec4, Material,MaterialAttrib)
+from panda3d.core import (NodePath, Vec3, Vec4, Material, MaterialAttrib)
 from environment.track_geometry import TrackGeometry
 
 class F1Vehicle:
-    def __init__(self, render: NodePath,loader, track_geometry: TrackGeometry = None):
+    def __init__(self, render: NodePath, loader, track_geometry: TrackGeometry = None):
         self.render = render
         self.loader = loader
         self.track_geometry = track_geometry
@@ -12,7 +12,7 @@ class F1Vehicle:
         self.heading = 0.0
 
         self.car = self.render.attachNewNode("f1_car")
-        model_path = "assets/models/2020_f1_mercedes-benz_w11.glb"
+        model_path = ("assets/models/2020_f1_mercedes-benz_w11.glb")
         self.model = self.loader.loadModel(model_path)
 
         if self.model.isEmpty():
@@ -20,7 +20,7 @@ class F1Vehicle:
 
         self.model.reparentTo(self.car)
 
-        self.model.setScale(1.6)
+        self.model.setScale(1.3)
         self.model.setH(-270)
 
         bounds = self.model.getTightBounds(self.car)
@@ -33,7 +33,7 @@ class F1Vehicle:
         minimum, maximum = bounds
         center_x = (minimum.x + maximum.x) / 2.0
         center_y = (minimum.y + maximum.y) / 2.0
-        self.model.setPos( -center_x, -center_y, -minimum.z)
+        self.model.setPos(-center_x, -center_y, -minimum.z)
         dimensions = maximum - minimum
         self._apply_visual_materials()
 
@@ -52,43 +52,45 @@ class F1Vehicle:
                 if material_attrib is None:
                     continue
 
-                original_material = material_attrib.getMaterial()
+                original_material = (
+                    material_attrib.getMaterial()
+                )
 
                 if original_material is None:
                     continue
 
-                material_name = original_material.getName().lower()
+                material_name = (original_material.getName().lower())
                 material = Material(original_material)
 
+                # Mercedes W11 metallic bodywork
                 if "ext_44" in material_name:
-                    material.setSpecular(Vec4(0.75, 0.75, 0.75, 1.0))
-                    material.setShininess(96.0)
-                    category = "Glossy bodywork"
+                    material.setSpecular( Vec4(1.0, 1.0, 1.0, 1.0))
+                    material.setShininess(180.0)
 
+                # Wheels and rims
                 elif "wheel" in material_name:
-                    material.setSpecular(Vec4(0.85, 0.85, 0.85, 1.0))
-                    material.setShininess(90.0)
-                    category = "Metallic wheels"
+                    material.setSpecular(Vec4(0.95, 0.95, 0.95, 1.0))
+                    material.setShininess(110.0)
 
+                # Tyres
                 elif "tyre_tread" in material_name:
-                    material.setSpecular(Vec4(0.045, 0.045, 0.045, 1.0))
-                    material.setShininess(6.0)
-                    category = "Matte tyres"
+                    material.setSpecular(Vec4(0.025, 0.025, 0.025, 1.0))
+                    material.setShininess(5.0)
 
+                # Metallic and carbon details
                 elif "misc" in material_name:
-                    material.setSpecular(Vec4(0.42, 0.42, 0.42, 1.0))
-                    material.setShininess(64.0)
-                    category = "Carbon and details"
+                    material.setSpecular(Vec4(0.65, 0.65, 0.65, 1.0))
+                    material.setShininess(90.0)
 
+                # Main chassis and aerodynamic bodywork
                 elif "car_chassis" in material_name:
-                    material.setSpecular(Vec4(0.38, 0.38, 0.38, 1.0))
-                    material.setShininess(52.0)
-                    category = "Chassis"
+                    material.setSpecular(Vec4(0.60, 0.60, 0.60, 1.0))
+                    material.setShininess(140.0)
 
+                # Logos and badges
                 elif "badges" in material_name:
-                    material.setSpecular(Vec4(0.55, 0.55, 0.55, 1.0))
-                    material.setShininess(72.0)
-                    category = "Badges"
+                    material.setSpecular(Vec4(0.85, 0.85, 0.85, 1.0))
+                    material.setShininess(110.0)
 
                 else:
                     continue
@@ -96,7 +98,10 @@ class F1Vehicle:
                 new_state = state.addAttrib(MaterialAttrib.make(material))
                 geom_node.setGeomState(i, new_state)
                 enhanced_count += 1
-                
+
+        print(f"[Vehicle] Enhanced glossy materials: {enhanced_count}")
+        print("[Vehicle] Model remains enabled for shadow rendering.")
+
     def set_position(self, x, y, z=0):
 
         self.position = Vec3(
@@ -130,4 +135,10 @@ class F1Vehicle:
                 "TrackGeometry has not been connected to F1Vehicle."
             )
 
-        return self.track_geometry.get_track_position([self.position.x, self.position.y, self.position.z])
+        return self.track_geometry.get_track_position(
+            [
+                self.position.x,
+                self.position.y,
+                self.position.z
+            ]
+        )
