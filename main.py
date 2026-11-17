@@ -1,10 +1,13 @@
 import numpy as np
 import torch
 from pathlib import Path
+import math
 from direct.showbase.ShowBase import ShowBase
 from direct.filter.CommonFilters import CommonFilters
 from direct.gui.OnscreenText import OnscreenText
-from panda3d.core import (WindowProperties, AmbientLight, DirectionalLight, Vec3, Vec4, ClockObject, TextNode)
+from direct.gui.OnscreenImage import OnscreenImage
+from direct.gui.DirectGui import DirectFrame
+from panda3d.core import (WindowProperties, AmbientLight, DirectionalLight, Vec3, Vec4, ClockObject, TextNode, PNMImage, Texture)
 from simulation.vehicle import F1Vehicle
 from environment.track_loader import TrackLoader
 from environment.racing_env import RacingEnv
@@ -49,47 +52,43 @@ class YasMarinaSimulator(ShowBase):
 
         self.win.requestProperties(properties)
 
-        # Night background
         self.setBackgroundColor(0.025, 0.035, 0.060, 1.0)
 
-        # Ambient lighting
-        ambient_light = AmbientLight(
-            "night_ambient"
-        )
+    
+        self.hud_font = None
 
-        ambient_light.setColor(
-            Vec4(
-                0.22,
-                0.24,
-                0.30,
-                1.0
+        try:
+            self.hud_font = self.loader.loadFont(
+                "C:/Windows/Fonts/arial.ttf"
             )
-        )
 
-        self.ambient_light_node = (
-            self.render.attachNewNode(
-                ambient_light
-            )
-        )
+            if self.hud_font:
+                self.hud_font.setPixelsPerUnit(100)
+                print("[HUD] High-resolution font loaded.")
+
+        except Exception as error:
+            print(f"[HUD] Custom font unavailable: {error}")
+
+        ambient_light = AmbientLight("night_ambient")
+        ambient_light.setColor(Vec4(0.22, 0.24, 0.30, 1.0))
+
+        self.ambient_light_node = (self.render.attachNewNode(ambient_light))
 
         self.render.setLight(self.ambient_light_node)
 
-        # Main directional light with dynamic shadows
         moon_light = DirectionalLight("moon_light")
-        moon_light.setColor(Vec4(0.22, 0.25, 0.32,1.0))
+
+        moon_light.setColor(Vec4(0.22, 0.25, 0.32, 1.0))
 
         self.moon_light_node = (self.render.attachNewNode(moon_light))
 
         self.moon_light_node.setHpr(35, -55, 0)
 
-        # Enable shadow mapping on the main light.
-        # The 64 track spotlights remain without shadows.
         moon_light.setShadowCaster(True, SHADOW_MAP_SIZE, SHADOW_MAP_SIZE)
         self.render.setLight(self.moon_light_node)
 
         print(f"[Graphics] Main shadow map: {SHADOW_MAP_SIZE}x{SHADOW_MAP_SIZE}")
 
-        # Bloom
         self.filters = None
         self.bloom_enabled = False
 
@@ -108,7 +107,6 @@ class YasMarinaSimulator(ShowBase):
 
             if self.bloom_enabled:
                 print("[Graphics] Bloom enabled.")
-
             else:
                 print("[Graphics] Bloom is not supported.")
 
@@ -117,7 +115,7 @@ class YasMarinaSimulator(ShowBase):
             self.bloom_enabled = False
             print(f"[Graphics] Bloom unavailable: {error}")
 
-        # Track
+    
         self.track = TrackLoader.load("yas_marina")
 
         self.track_mesh = TrackMesh(
@@ -126,49 +124,43 @@ class YasMarinaSimulator(ShowBase):
         )
         self.track_mesh.create()
 
-        # Environment
         self.environment = TrackEnvironment(
             self.render,
             self.track
         )
         self.environment.create()
 
-        # Barriers
         self.barriers = TrackBarriers(
             self.render,
             self.track
         )
         self.barriers.create()
 
-        # Track markings
         self.track_markings = TrackMarkings(
             self.render,
             self.track
         )
         self.track_markings.create()
 
-        # Grandstands
         self.grandstands = TrackGrandstands(
             self.track,
             self.render
         )
         self.grandstands.create()
 
-        # Track lighting
         self.track_lighting = TrackLighting(
             self.render,
             self.track
         )
         self.track_lighting.create()
 
-        # Facilities
         self.facilities = TrackFacilities(
             self.render,
             self.track
         )
         self.facilities.create()
 
-        # Vehicle
+    
         self.vehicle = F1Vehicle(
             self.render,
             self.loader,
@@ -185,15 +177,9 @@ class YasMarinaSimulator(ShowBase):
 
         start_heading = self.track.get_heading(0)
 
-        self.vehicle.set_rotation(
-            start_heading
-        )
-
-        # Automatic shaders for lighting and shadows
+        self.vehicle.set_rotation(start_heading)
 
         self.render.setShaderAuto()
-
-        # Camera
 
         self.camLens.setFov(50)
 
@@ -221,9 +207,7 @@ class YasMarinaSimulator(ShowBase):
             start_speed=0.0
         )
 
-        self.observation, self.info = (
-            self.env.reset()
-        )
+        self.observation, self.info = self.env.reset()
 
         self.simulation_accumulator = 0.0
 
@@ -238,48 +222,356 @@ class YasMarinaSimulator(ShowBase):
         self.completed_laps = 0
         self.last_reward = 0.0
 
+        self.last_action = np.zeros(
+            self.model.action_space.shape,
+            dtype=np.float32
+        )
+
+        initial_state = self.env.controller.get_state()
+        self.vehicle.set_steering_angle(initial_state["steering_angle"])
+
+
         self.setup_reward_hud()
+        self.setup_f1_hud()
 
         self.update_vehicle_visuals()
         self.update_camera(1.0)
+        self.update_f1_hud()
 
         self.taskMgr.add(
             self.update_agent,
             "update_agent"
         )
 
-        print(
-            "[PPO] Autonomous driving started."
+        print("[PPO] Autonomous driving started.")
+
+
+    def create_hud_text(self, text, pos,
+        scale,
+        color,
+        align=TextNode.ACenter
+    ):
+
+        return OnscreenText(
+            text=text,
+            pos=pos,
+            scale=scale,
+            fg=color,
+            align=align,
+            font=self.hud_font,
+            mayChange=True,
+            shadow=(0, 0, 0, 0.45),
+            shadowOffset=(0.015, 0.015)
         )
+
+    def create_rounded_panel_texture(self):
+
+        width = 512
+        height = 160
+        radius = 28
+
+        image = PNMImage(
+            width,
+            height,
+            4
+        )
+
+        image.fill(0.012, 0.020, 0.035)
+        image.alphaFill(0.0)
+
+        for y in range(height):
+            for x in range(width):
+
+                nearest_x = min(
+                    max(x, radius),
+                    width - radius - 1
+                )
+
+                nearest_y = min(
+                    max(y, radius),
+                    height - radius - 1
+                )
+
+                dx = x - nearest_x
+                dy = y - nearest_y
+
+                inside = (
+                    dx * dx + dy * dy
+                    <= radius * radius
+                )
+
+                if (
+                    inside
+                    or (
+                        radius <= x < width - radius
+                        or radius <= y < height - radius
+                    )
+                ):
+                    image.setXelA(
+                        x,
+                        y,
+                        0.012,
+                        0.020,
+                        0.035,
+                        0.90
+                    )
+
+        texture = Texture("rounded_telemetry_panel")
+        texture.load(image)
+
+        texture.setMinfilter(Texture.FTLinear)
+        texture.setMagfilter(Texture.FTLinear)
+
+        return texture
+
 
     def setup_reward_hud(self):
 
-        self.reward_hud = OnscreenText(
-            text="",
-            pos=(-1.30, 0.88),
-            scale=0.045,
-            fg=(0.35, 0.85, 1.0, 1.0),
-            align=TextNode.ALeft,
-            mayChange=True,
-            shadow=(0, 0, 0, 0.8),
-            shadowOffset=(0.04, 0.04)
+        self.reward_last_hud = self.create_hud_text(
+            text="LAST  +0.00",
+            pos=(-1.68, 0.925),
+            scale=0.032,
+            color=(0.20, 1.0, 0.42, 1.0),
+            align=TextNode.ALeft
         )
+
+        self.reward_total_hud = self.create_hud_text(
+            text="TOTAL  +0.00",
+            pos=(-1.68, 0.865),
+            scale=0.032,
+            color=(0.0, 0.82, 0.95, 1.0),
+            align=TextNode.ALeft
+        )
+
+        self.reward_last_hud.setBin("fixed", 20)
+        self.reward_total_hud.setBin("fixed", 20)
 
         self.update_reward_hud()
 
     def update_reward_hud(self):
 
+        reward = self.last_reward
+        total = self.total_reward
+
+        # Last step reward color
+
+        if reward > 0.000001:
+            last_color = (0.20, 1.0, 0.42, 1.0)
+            last_text = f"+{reward:.2f}"
+
+        elif reward < -0.000001:
+            last_color = (1.0, 0.25, 0.25, 1.0)
+            last_text = f"{reward:.2f}"
+
+        else:
+            last_color = (0.90, 0.96, 1.0, 1.0)
+            last_text = "0.00"
+
+        # Total episode reward
+
+        if total >= 0:
+            total_text = f"+{total:,.2f}"
+        else:
+            total_text = f"{total:,.2f}"
+
+        self.reward_last_hud.setText(
+            f"LAST  {last_text}"
+        )
+
+        self.reward_last_hud.setFg(last_color)
+
+        self.reward_total_hud.setText(
+            f"TOTAL  {total_text}"
+        )
+
+    def setup_f1_hud(self):
+
+        # Rounded main panel
+
+        panel_texture = self.create_rounded_panel_texture()
+
+        self.telemetry_panel = OnscreenImage(
+            image=panel_texture,
+            parent=self.aspect2d,
+            pos=(0, 0, -0.805),
+            scale=(0.55, 1, 0.145)
+        )
+
+        self.telemetry_panel.setTransparency(True)
+        self.telemetry_panel.setBin("fixed", 10)
+
+        # Top accent
+
+        self.telemetry_accent = DirectFrame(
+            parent=self.aspect2d,
+            frameColor=(0.0, 0.78, 0.90, 0.95),
+            frameSize=(-0.49, 0.49, -0.002, 0.002),
+            pos=(0, 0, -0.662)
+        )
+
+        # Bottom accent
+
+        self.telemetry_bottom_accent = DirectFrame(
+            parent=self.aspect2d,
+            frameColor=(0.15, 0.20, 0.27, 0.75),
+            frameSize=(-0.40, 0.40, -0.001, 0.001),
+            pos=(0, 0, -0.948)
+        )
+
+        self.steering_hud = self.create_hud_text(
+            text="0.0°",
+            pos=(0.0, -0.680),
+            scale=0.026,
+            color=(0.72, 0.86, 0.96, 1.0)
+        )
+
+        self.throttle_hud = self.create_hud_text(
+            text="0%",
+            pos=(-0.31, -0.738),
+            scale=0.040,
+            color=(0.20, 1.0, 0.42, 1.0)
+        )
+
+        self.gear_hud = self.create_hud_text(
+            text="N",
+            pos=(0.0, -0.738),
+            scale=0.054,
+            color=(1.0, 0.85, 0.20, 1.0)
+        )
+
+        self.brake_hud = self.create_hud_text(
+            text="0%",
+            pos=(0.31, -0.738),
+            scale=0.040,
+            color=(1.0, 0.28, 0.28, 1.0)
+        )
+
+        # Separators
+
+        self.left_separator = DirectFrame(
+            parent=self.aspect2d,
+            frameColor=(0.25, 0.34, 0.43, 0.75),
+            frameSize=(-0.001, 0.001, -0.025, 0.025),
+            pos=(-0.155, 0, -0.738)
+        )
+
+        self.right_separator = DirectFrame(
+            parent=self.aspect2d,
+            frameColor=(0.25, 0.34, 0.43, 0.75),
+            frameSize=(-0.001, 0.001, -0.025, 0.025),
+            pos=(0.155, 0, -0.738)
+        )
+
+        self.speed_hud = self.create_hud_text(
+            text="0  KM/H",
+            pos=(0.0, -0.845),
+            scale=0.066,
+            color=(1.0, 1.0, 1.0, 1.0),
+            align=TextNode.ACenter
+        )
+
+   
+        self.rpm_hud = self.create_hud_text(
+            text="1000",
+            pos=(0.0, -0.920),
+            scale=0.024,
+            color=(0.68, 0.78, 0.88, 1.0)
+        )
+
+    def get_control_values(self, state):
+
+        action = np.asarray(
+            self.last_action,
+            dtype=np.float32
+        ).flatten()
+
+        if len(action) >= 3:
+
+            throttle = float(
+                np.clip(action[1], 0.0, 1.0)
+            )
+
+            brake = float(
+                np.clip(action[2], 0.0, 1.0)
+            )
+
+        else:
+            throttle = 0.0
+            brake = 0.0
+
+        return throttle, brake
+
+    def update_f1_hud(self):
+
         state = self.env.controller.get_state()
 
-        speed_kmh = state["speed"] * 3.6
+        speed_ms = max(
+            0.0,
+            float(state["speed"])
+        )
 
-        self.reward_hud.setText(
-            f"F1 AUTONOMOUS RACING\n"
-            f"-------------------------\n"
-            f"REWARD:      {self.total_reward:10.2f}\n"
-            f"LAST REWARD: {self.last_reward:10.4f}\n"
-            f"SPEED:       {speed_kmh:10.1f} km/h\n"
-            f"LAPS:        {self.completed_laps:10d}"
+        speed_kmh = speed_ms * 3.6
+
+        steering_deg = math.degrees(
+            float(state["steering_angle"])
+        )
+
+        throttle, brake = self.get_control_values(state)
+
+        # Estimated gear and RPM.
+        # Actual gearbox simulation is not implemented yet.
+
+        if speed_kmh < 5:
+
+            gear = "N"
+            rpm = 1000
+
+        else:
+
+            gear_number = min(
+                8,
+                max(
+                    1,
+                    int(speed_kmh / 45) + 1
+                )
+            )
+
+            gear = str(gear_number)
+
+            gear_min_speed = (gear_number - 1) * 45
+            gear_max_speed = gear_number * 45
+
+            gear_progress = (
+                speed_kmh - gear_min_speed
+            ) / max(
+                1,
+                gear_max_speed - gear_min_speed
+            )
+
+            rpm = int(
+                5000 + np.clip(gear_progress, 0, 1) * 7000
+            )
+
+        self.speed_hud.setText(
+            f"{speed_kmh:.0f}  KM/H"
+        )
+
+        self.gear_hud.setText(gear)
+
+        self.rpm_hud.setText(
+            f"{rpm:,}"
+        )
+
+        self.throttle_hud.setText(
+            f"{throttle * 100:.0f}%"
+        )
+
+        self.brake_hud.setText(
+            f"{brake * 100:.0f}%"
+        )
+
+        self.steering_hud.setText(
+            f"{steering_deg:+.1f}°"
         )
 
     def predict_action(self, observation):
@@ -351,7 +643,8 @@ class YasMarinaSimulator(ShowBase):
         self.previous_heading = heading
         self.current_heading = heading
 
-    def update_vehicle_visuals(self, alpha=1.0):
+    def update_vehicle_visuals(self, alpha=1.0, dt=0.0):
+
         if self.previous_position is None:
             self.update_interpolation_state()
 
@@ -387,10 +680,16 @@ class YasMarinaSimulator(ShowBase):
         )
 
         self.vehicle.set_position(x, y, 0.2)
-
         self.vehicle.set_rotation(heading)
+
         state = self.env.controller.get_state()
+
         self.vehicle.set_speed(state["speed"])
+        self.vehicle.update_wheel_rotation(dt)
+
+        self.vehicle.set_steering_angle(
+            state["steering_angle"]
+        )
 
     def update_camera(self, dt):
 
@@ -431,19 +730,38 @@ class YasMarinaSimulator(ShowBase):
         )
 
     def reset_agent(self):
-        self.observation, self.info = (self.env.reset())
+
+        self.observation, self.info = self.env.reset()
+
         self.total_reward = 0.0
         self.last_reward = 0.0
+
+        self.last_action = np.zeros(
+            self.model.action_space.shape,
+            dtype=np.float32
+        )
+
         self.update_interpolation_state()
 
+        state = self.env.controller.get_state()
+
+        self.vehicle.set_steering_angle(
+            state["steering_angle"]
+        )
+
     def update_agent(self, task):
-        frame_dt = (ClockObject.getGlobalClock().getDt())
-        frame_dt = max(0.0, min(frame_dt, MAX_FRAME_DT))
+
+        frame_dt = ClockObject.getGlobalClock().getDt()
+
+        frame_dt = max(
+            0.0,
+            min(frame_dt, MAX_FRAME_DT)
+        )
 
         self.simulation_accumulator += frame_dt
 
         if self.simulation_accumulator > MAX_ACCUMULATOR:
-            self.simulation_accumulator = (MAX_ACCUMULATOR)
+            self.simulation_accumulator = MAX_ACCUMULATOR
 
         steps_this_frame = 0
 
@@ -452,12 +770,14 @@ class YasMarinaSimulator(ShowBase):
             and steps_this_frame < MAX_STEPS_PER_FRAME
         ):
 
-            self.previous_position = (self.current_position)
-            self.previous_heading = (self.current_heading)
+            self.previous_position = self.current_position
+            self.previous_heading = self.current_heading
 
             action = self.predict_action(
                 self.observation
             )
+
+            self.last_action = np.asarray(action, dtype=np.float32).copy()
 
             (
                 self.observation,
@@ -488,9 +808,12 @@ class YasMarinaSimulator(ShowBase):
 
             if self.total_steps % 600 == 0:
 
-                state = self.env.controller.get_state()
-
-                print(f"[PPO] Speed: {state['speed']:.2f} m/s | Position: ({state['x']:.2f}, {state['y']:.2f})")
+                print(
+                    f"[PPO] Speed: {state['speed']:.2f} m/s | "
+                    f"Position: ({state['x']:.2f}, {state['y']:.2f}) | "
+                    f"Steering: "
+                    f"{math.degrees(state['steering_angle']):.2f} deg"
+                )
 
             if terminated or truncated:
                 if info.get("lap_completed", False):
@@ -501,9 +824,10 @@ class YasMarinaSimulator(ShowBase):
                 self.reset_agent()
 
         alpha = (self.simulation_accumulator / SIMULATION_DT)
-        self.update_vehicle_visuals(alpha)
+        self.update_vehicle_visuals(alpha, frame_dt)
         self.update_camera(frame_dt)
         self.update_reward_hud()
+        self.update_f1_hud()
         return task.cont
 
 if __name__ == "__main__":
