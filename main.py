@@ -12,12 +12,14 @@ from simulation.vehicle import F1Vehicle
 from environment.track_loader import TrackLoader
 from environment.racing_env import RacingEnv
 from tracks.yas_marina.track_mesh import TrackMesh
-from tracks.yas_marina.track_environment import TrackEnvironment
+from tracks.yas_marina.track_environment_polished import PolishedEnvironment
+from tracks.yas_marina.track_runoff import TrackRunoff
 from tracks.yas_marina.track_barriers import TrackBarriers
 from tracks.yas_marina.track_grandstands import TrackGrandstands
 from tracks.yas_marina.track_lighting import TrackLighting
 from tracks.yas_marina.track_facilities import TrackFacilities
 from tracks.yas_marina.track_markings import TrackMarkings
+from tracks.yas_marina.track_light_tools import bake_vertex_lighting, CarBlobShadow
 
 torch.set_num_threads(1)
 
@@ -37,7 +39,6 @@ MAX_ACCUMULATOR = SIMULATION_DT * MAX_STEPS_PER_FRAME
 CAMERA_DISTANCE = 10.0
 CAMERA_HEIGHT = 3.5
 CAMERA_LOOK_AHEAD = 6.0
-SHADOW_MAP_SIZE = 1024
 
 
 class YasMarinaSimulator(ShowBase):
@@ -51,16 +52,11 @@ class YasMarinaSimulator(ShowBase):
         properties.setSize(960, 540)
 
         self.win.requestProperties(properties)
-
         self.setBackgroundColor(0.025, 0.035, 0.060, 1.0)
-
-    
         self.hud_font = None
 
         try:
-            self.hud_font = self.loader.loadFont(
-                "C:/Windows/Fonts/arial.ttf"
-            )
+            self.hud_font = self.loader.loadFont("C:/Windows/Fonts/arial.ttf")
 
             if self.hud_font:
                 self.hud_font.setPixelsPerUnit(100)
@@ -73,37 +69,20 @@ class YasMarinaSimulator(ShowBase):
         ambient_light.setColor(Vec4(0.22, 0.24, 0.30, 1.0))
 
         self.ambient_light_node = (self.render.attachNewNode(ambient_light))
-
         self.render.setLight(self.ambient_light_node)
 
         moon_light = DirectionalLight("moon_light")
-
         moon_light.setColor(Vec4(0.22, 0.25, 0.32, 1.0))
 
         self.moon_light_node = (self.render.attachNewNode(moon_light))
-
         self.moon_light_node.setHpr(35, -55, 0)
-
-        moon_light.setShadowCaster(True, SHADOW_MAP_SIZE, SHADOW_MAP_SIZE)
         self.render.setLight(self.moon_light_node)
-
-        print(f"[Graphics] Main shadow map: {SHADOW_MAP_SIZE}x{SHADOW_MAP_SIZE}")
-
         self.filters = None
         self.bloom_enabled = False
 
         try:
-            self.filters = CommonFilters(
-                self.win,
-                self.cam
-            )
-
-            self.bloom_enabled = self.filters.setBloom(
-                blend=(0.10, 0.10, 0.10, 0.0),
-                desat=0.0,
-                intensity=0.5,
-                size="medium"
-            )
+            self.filters = CommonFilters(self.win, self.cam)
+            self.bloom_enabled = self.filters.setBloom(blend=(0.10, 0.10, 0.10, 0.0), desat=0.0, intensity=0.5, size="medium")
 
             if self.bloom_enabled:
                 print("[Graphics] Bloom enabled.")
@@ -118,47 +97,37 @@ class YasMarinaSimulator(ShowBase):
     
         self.track = TrackLoader.load("yas_marina")
 
-        self.track_mesh = TrackMesh(
-            self.render,
-            self.track
-        )
+        self.track_lighting = TrackLighting( self.render, self.track)
+        self.track_lighting.create()
+        self.light_field = self.track_lighting.make_light_field()
+
+        self.track_mesh = TrackMesh(self.render, self.track, self.light_field)
         self.track_mesh.create()
 
-        self.environment = TrackEnvironment(
-            self.render,
-            self.track
-        )
+        self.environment = PolishedEnvironment(self.render, self.track, self.light_field)
         self.environment.create()
 
-        self.barriers = TrackBarriers(
-            self.render,
-            self.track
-        )
+        self.runoff = TrackRunoff(self.render, self.track, self.light_field)
+        self.runoff.create()
+
+        self.barriers = TrackBarriers(self.render, self.track)
         self.barriers.create()
 
-        self.track_markings = TrackMarkings(
-            self.render,
-            self.track
-        )
+        self.track_markings = TrackMarkings(self.render, self.track)
         self.track_markings.create()
 
-        self.grandstands = TrackGrandstands(
-            self.track,
-            self.render
-        )
+        self.grandstands = TrackGrandstands(self.track, self.render)
         self.grandstands.create()
 
-        self.track_lighting = TrackLighting(
-            self.render,
-            self.track
-        )
-        self.track_lighting.create()
-
-        self.facilities = TrackFacilities(
-            self.render,
-            self.track
-        )
+        self.facilities = TrackFacilities( self.render, self.track)
         self.facilities.create()
+
+        for root in (self.track_markings.root, self.barriers.root, self.grandstands.root, self.facilities.root,):
+            root.flattenStrong()
+
+        bake_vertex_lighting(self.track_markings.root, self.light_field, up=True)
+        bake_vertex_lighting(self.barriers.root, self.light_field, up=False)
+        bake_vertex_lighting(self.grandstands.root, self.light_field, up=False)
 
     
         self.vehicle = F1Vehicle(
@@ -178,9 +147,8 @@ class YasMarinaSimulator(ShowBase):
         start_heading = self.track.get_heading(0)
 
         self.vehicle.set_rotation(start_heading)
-
+        self.blob_shadow = CarBlobShadow(self.render, heading_offset=0.0)
         self.render.setShaderAuto()
-
         self.camLens.setFov(50)
 
         from stable_baselines3 import PPO
@@ -518,61 +486,26 @@ class YasMarinaSimulator(ShowBase):
 
         throttle, brake = self.get_control_values(state)
 
-        # Estimated gear and RPM.
-        # Actual gearbox simulation is not implemented yet.
 
         if speed_kmh < 5:
-
             gear = "N"
             rpm = 1000
 
         else:
-
-            gear_number = min(
-                8,
-                max(
-                    1,
-                    int(speed_kmh / 45) + 1
-                )
-            )
-
+            gear_number = min(8, max(1, int(speed_kmh / 45) + 1))
             gear = str(gear_number)
-
             gear_min_speed = (gear_number - 1) * 45
             gear_max_speed = gear_number * 45
 
-            gear_progress = (
-                speed_kmh - gear_min_speed
-            ) / max(
-                1,
-                gear_max_speed - gear_min_speed
-            )
+            gear_progress = (speed_kmh - gear_min_speed) / max(1, gear_max_speed - gear_min_speed)
+            rpm = int(5000 + np.clip(gear_progress, 0, 1) * 7000)
 
-            rpm = int(
-                5000 + np.clip(gear_progress, 0, 1) * 7000
-            )
-
-        self.speed_hud.setText(
-            f"{speed_kmh:.0f}  KM/H"
-        )
-
+        self.speed_hud.setText(f"{speed_kmh:.0f}  KM/H")
         self.gear_hud.setText(gear)
-
-        self.rpm_hud.setText(
-            f"{rpm:,}"
-        )
-
-        self.throttle_hud.setText(
-            f"{throttle * 100:.0f}%"
-        )
-
-        self.brake_hud.setText(
-            f"{brake * 100:.0f}%"
-        )
-
-        self.steering_hud.setText(
-            f"{steering_deg:+.1f}°"
-        )
+        self.rpm_hud.setText(f"{rpm:,}")
+        self.throttle_hud.setText(f"{throttle * 100:.0f}%")
+        self.brake_hud.setText(f"{brake * 100:.0f}%")
+        self.steering_hud.setText(f"{steering_deg:+.1f}°")
 
     def predict_action(self, observation):
 
@@ -691,6 +624,9 @@ class YasMarinaSimulator(ShowBase):
             state["steering_angle"]
         )
 
+        self.track_lighting.update(x, y)
+        self.blob_shadow.follow(self.vehicle.car)
+
     def update_camera(self, dt):
 
         car_position = self.vehicle.car.getPos(
@@ -779,13 +715,7 @@ class YasMarinaSimulator(ShowBase):
 
             self.last_action = np.asarray(action, dtype=np.float32).copy()
 
-            (
-                self.observation,
-                reward,
-                terminated,
-                truncated,
-                info
-            ) = self.env.step(action)
+            (self.observation, reward, terminated, truncated, info) = self.env.step(action)
 
             self.last_reward = float(reward)
             self.total_reward += self.last_reward
@@ -793,27 +723,14 @@ class YasMarinaSimulator(ShowBase):
 
             state = self.env.controller.get_state()
 
-            self.current_position = (
-                float(state["x"]),
-                float(state["y"])
-            )
-
-            self.current_heading = float(
-                state["heading_deg"]
-            )
-
+            self.current_position = (float(state["x"]), float(state["y"]))
+            self.current_heading = float(state["heading_deg"])
             self.simulation_accumulator -= SIMULATION_DT
 
             steps_this_frame += 1
 
             if self.total_steps % 600 == 0:
-
-                print(
-                    f"[PPO] Speed: {state['speed']:.2f} m/s | "
-                    f"Position: ({state['x']:.2f}, {state['y']:.2f}) | "
-                    f"Steering: "
-                    f"{math.degrees(state['steering_angle']):.2f} deg"
-                )
+                print(f"[PPO] Speed: {state['speed']:.2f} m/s | Position: ({state['x']:.2f}, {state['y']:.2f}) | Steering: {math.degrees(state['steering_angle']):.2f} deg")
 
             if terminated or truncated:
                 if info.get("lap_completed", False):
