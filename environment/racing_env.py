@@ -1,4 +1,5 @@
-﻿import gymnasium as gym
+﻿
+import gymnasium as gym
 import numpy as np
 from gymnasium import spaces
 
@@ -67,19 +68,38 @@ class RacingEnv(gym.Env):
         self.previous_action = np.zeros(3, dtype=np.float32)
         self.previous_progress = 0.0
         self.current_progress = 0.0
-        self.action_space = spaces.Box(low=np.array([-1.0, 0.0, 0.0], dtype=np.float32), high=np.array([1.0, 1.0, 1.0], dtype=np.float32), dtype=np.float32)
-        self.observation_space = spaces.Box(low=-1.0, high=1.0, shape=(19,), dtype=np.float32)
+
+        self.action_space = spaces.Box(
+            low=np.array([-1.0, 0.0, 0.0], dtype=np.float32),
+            high=np.array([1.0, 1.0, 1.0], dtype=np.float32),
+            dtype=np.float32
+        )
+
+        self.observation_space = spaces.Box(
+            low=-1.0,
+            high=1.0,
+            shape=(19,),
+            dtype=np.float32
+        )
 
     # Configure the selected track.
     def _set_track(self, track_name):
         if track_name not in self.track_cache:
-            raise ValueError(f"Track '{track_name}' is not loaded. Available tracks: {self.track_names}")
+            raise ValueError(
+                f"Track '{track_name}' is not loaded. Available tracks: {self.track_names}"
+            )
 
         self.track_name = track_name
         self.track = self.track_cache[track_name]
 
-        self.track_points = np.asarray(self.track.centerline, dtype=np.float64)
-        self.track_length = float(self.track.get_track_length())
+        self.track_points = np.asarray(
+            self.track.centerline,
+            dtype=np.float64
+        )
+
+        self.track_length = float(
+            self.track.get_track_length()
+        )
 
         self.num_track_points = len(self.track_points)
 
@@ -88,7 +108,9 @@ class RacingEnv(gym.Env):
                 "Track must contain at least two points."
             )
 
-        self.start_index = (self.requested_start_index % self.num_track_points)
+        self.start_index = (
+            self.requested_start_index % self.num_track_points
+        )
 
         # Close the centerline by connecting the last point
         # to the first point.
@@ -97,7 +119,10 @@ class RacingEnv(gym.Env):
             self.track_points[0]
         ])
 
-        segment_vectors = np.diff(closed_points, axis=0)
+        segment_vectors = np.diff(
+            closed_points,
+            axis=0
+        )
 
         self.centerline_segment_lengths = np.linalg.norm(
             segment_vectors,
@@ -176,7 +201,9 @@ class RacingEnv(gym.Env):
             (progress - segment_start) / segment_length
         )
 
-        next_index = (index + 1) % self.num_track_points
+        next_index = (
+            index + 1
+        ) % self.num_track_points
 
         point = (
             self.track_points[index]
@@ -187,6 +214,80 @@ class RacingEnv(gym.Env):
         )
 
         return point
+
+    def _get_curvature_at_progress(self, progress):
+        progress = float(progress)
+        progress %= self.track_length
+
+        index = (
+            np.searchsorted(
+                self.track.distance,
+                progress,
+                side="right"
+            ) - 1
+        )
+
+        index = min(
+            max(index, 0),
+            self.num_track_points - 1
+        )
+
+        next_index = (
+            index + 1
+        ) % self.num_track_points
+
+        segment_start = float(
+            self.track.distance[index]
+        )
+
+        segment_length = float(
+            self.track.segment_lengths[index]
+        )
+
+        if segment_length <= 1e-9:
+            return float(
+                self.track.curvature[index]
+            )
+
+        fraction = (
+            (progress - segment_start) / segment_length
+        )
+
+        fraction = float(
+            np.clip(fraction, 0.0, 1.0)
+        )
+
+        curvature = (
+            self.track.curvature[index] * (1.0 - fraction)
+            + self.track.curvature[next_index] * fraction
+        )
+
+        return float(curvature)
+
+    def _get_future_curvatures(self, nearest):
+        lookahead_distances = [
+            5.0,
+            10.0,
+            20.0,
+            40.0
+        ]
+
+        future_curvatures = []
+
+        for distance in lookahead_distances:
+            target_progress = (
+                float(nearest["progress"]) + distance
+            )
+
+            curvature = self._get_curvature_at_progress(
+                target_progress
+            )
+
+            future_curvatures.append(
+                float(curvature)
+            )
+
+        return future_curvatures
 
     def _get_relative_lookahead(
         self,
@@ -323,8 +424,13 @@ class RacingEnv(gym.Env):
         return float(delta)
 
     def _is_within_track(self):
-        tire_positions = (self.track_limits._get_tire_positions(self.state))
-        tires_outside = (self.track_limits._check_track_limits(tire_positions))
+        tire_positions = (
+            self.track_limits._get_tire_positions(self.state)
+        )
+
+        tires_outside = (
+            self.track_limits._check_track_limits(tire_positions)
+        )
 
         return len(tires_outside) == 0
 
@@ -338,12 +444,16 @@ class RacingEnv(gym.Env):
 
         if requested_track is not None:
             if requested_track not in self.track_cache:
-                raise ValueError(f"Track '{requested_track}' is not available. Available tracks: {self.track_names}")
+                raise ValueError(
+                    f"Track '{requested_track}' is not available. Available tracks: {self.track_names}"
+                )
 
             selected_track = requested_track
 
         elif self.randomize_tracks:
-            selected_track = self.np_random.choice(self.track_names)
+            selected_track = self.np_random.choice(
+                self.track_names
+            )
 
         else:
             selected_track = self.track_names[0]
@@ -443,7 +553,9 @@ class RacingEnv(gym.Env):
 
         nearest = self._get_nearest_track_point()
 
-        new_progress = float(nearest["progress"])
+        new_progress = float(
+            nearest["progress"]
+        )
 
         progress_delta = self._calculate_progress_delta(
             old_progress,
@@ -453,6 +565,11 @@ class RacingEnv(gym.Env):
         self.current_progress = new_progress
 
         observation = self._get_observation()
+
+        # Calculate curvature ahead of the vehicle.
+        future_curvatures = self._get_future_curvatures(
+            nearest
+        )
 
         terminated = False
         truncated = False
@@ -472,10 +589,14 @@ class RacingEnv(gym.Env):
             previous_action=old_action,
             current_action=action,
             within_track=within_track,
+            future_curvatures=future_curvatures,
         )
 
         # Apply track limits penalty.
-        track_limit_penalty = float(limits_info["penalty"])
+        track_limit_penalty = float(
+            limits_info["penalty"]
+        )
+
         reward -= track_limit_penalty
 
         # Leaving the ground plane terminates the episode.
@@ -541,6 +662,7 @@ class RacingEnv(gym.Env):
             "environment_total_reward": float(reward),
             "lap_completed": lap_completed,
             "lap_count": self.lap_completion.get_lap_count(),
+            "future_curvatures": future_curvatures,
         }
 
         return (
