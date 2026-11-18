@@ -9,8 +9,8 @@ from environment.racing_env import RacingEnv
 
 TRACK_NAMES = ["yas_marina", "hockenheim", "sochi", "sepang", "monza", "sao_paulo", "shanghai",]
 
-TOTAL_TIMESTEPS = 500_000
-MAX_EPISODE_STEPS = 12000
+TOTAL_TIMESTEPS = 5_000_000 #4m. secondary retrain
+MAX_EPISODE_STEPS = 24000
 MODEL_NAME = "ppo_racing_agent"
 CHECKPOINT_FREQUENCY = 100_000
 PROGRESS_FREQUENCY = 10_000
@@ -55,16 +55,9 @@ class TrainingProgressCallback(BaseCallback):
     def _on_step(self):
         current_steps = self.num_timesteps - self.start_steps
 
-        if (
-            current_steps >= self.next_report
-            or current_steps >= self.total_timesteps
-        ):
+        if (current_steps >= self.next_report or current_steps >= self.total_timesteps):
             elapsed = time.perf_counter() - self.start_time
-
-            progress = min(
-                current_steps / self.total_timesteps,
-                1.0
-            )
+            progress = min(current_steps / self.total_timesteps, 1.0)
 
             steps_per_second = (
                 current_steps / elapsed
@@ -72,27 +65,14 @@ class TrainingProgressCallback(BaseCallback):
                 else 0.0
             )
 
-            remaining_steps = max(
-                0,
-                self.total_timesteps - current_steps
-            )
-
+            remaining_steps = max(0, self.total_timesteps - current_steps)
             estimated_remaining = (
                 remaining_steps / steps_per_second
                 if steps_per_second > 0
                 else 0.0
             )
 
-            print(
-                f"\rProgress: {progress * 100:6.2f}%"
-                f" | Steps: {current_steps:,}/{self.total_timesteps:,}"
-                f" | Speed: {steps_per_second:.1f} steps/s"
-                f" | Elapsed: {format_time(elapsed)}"
-                f" | Remaining: {format_time(estimated_remaining)}",
-                end="",
-                flush=True
-            )
-
+            print(f"\rProgress: {progress * 100:6.2f}% | Steps: {current_steps:,}/{self.total_timesteps:,} | Speed: {steps_per_second:.1f} steps/s | Elapsed: {format_time(elapsed)} | Remaining: {format_time(estimated_remaining)}", end="", flush=True)
             self.next_report += self.report_frequency
 
         return True
@@ -102,12 +82,7 @@ class TrainingProgressCallback(BaseCallback):
 
 
 def create_training_environment():
-    env = RacingEnv(
-        track_names=TRACK_NAMES,
-        max_episode_steps=MAX_EPISODE_STEPS,
-        start_speed=0.0,
-    )
-
+    env = RacingEnv(track_names=TRACK_NAMES, max_episode_steps=MAX_EPISODE_STEPS, start_speed=0.0,)
     env = Monitor(env)
     return env
 
@@ -122,22 +97,13 @@ def load_or_create_model(env):
         backup_path = MODELS_DIR / f"{MODEL_NAME}_before_finetune.zip"
 
         if not backup_path.exists():
-            shutil.copy2(
-                model_path,
-                backup_path
-            )
-
+            shutil.copy2(model_path, backup_path)
             print("\nOriginal model backup created:")
             print(backup_path)
 
         print("\nLoading existing model for continued training...")
 
-        model = PPO.load(
-            str(model_path),
-            env=env,
-            device="auto",
-        )
-
+        model = PPO.load(str(model_path), env=env, device="auto",)
         return model, True
 
     print("\nNo existing model found.")
@@ -156,14 +122,7 @@ def load_or_create_model(env):
         ent_coef=0.005,
         vf_coef=0.5,
         max_grad_norm=0.5,
-
-        policy_kwargs={
-            "net_arch": {
-                "pi": [256, 256],
-                "vf": [256, 256],
-            }
-        },
-
+        policy_kwargs={"net_arch": {"pi": [256, 256], "vf": [256, 256],}},
         verbose=1,
         tensorboard_log=str(TENSORBOARD_DIR),
         device="auto",
@@ -175,12 +134,10 @@ def load_or_create_model(env):
 
 def main():
     print("\nTraining tracks:")
-
     for track_name in TRACK_NAMES:
         print(f"- {track_name}")
 
     print(f"\nAdditional timesteps: {TOTAL_TIMESTEPS:,}, Maximum episode steps: {MAX_EPISODE_STEPS:,}, Checkpoint frequency: {CHECKPOINT_FREQUENCY:,}")
-
     env = create_training_environment()
 
     try:
@@ -200,20 +157,11 @@ def main():
 
         print(f"- Additional steps: {TOTAL_TIMESTEPS:,}")
 
-        model.learn(
-            total_timesteps=TOTAL_TIMESTEPS,
-            callback=callback,
-            tb_log_name=MODEL_NAME,
-            reset_num_timesteps=not resume_training,
-        )
-
+        model.learn(total_timesteps=TOTAL_TIMESTEPS, callback=callback, tb_log_name=MODEL_NAME, reset_num_timesteps=not resume_training,)
         final_model_path = MODELS_DIR / MODEL_NAME
-
         model.save(str(final_model_path))
 
-        print("\nTraining complete.")
-        print("Final model saved to:")
-        print(final_model_path)
+        print("\nTraining complete")
 
     except KeyboardInterrupt:
         print("\n\nTraining interrupted by user.")

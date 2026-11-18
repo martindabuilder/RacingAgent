@@ -82,24 +82,21 @@ class F1Vehicle:
                     material.setShininess(5)
 
                 elif "misc" in material_name:
-                    material.setSpecular(Vec4(0.65, 0.65, 0.65, 1))
-                    material.setShininess(90)
+                    material.setSpecular(Vec4(0.85, 0.85, 0.85, 1))
+                    material.setShininess(130)
 
                 elif "car_chassis" in material_name:
-                    material.setSpecular(Vec4(0.60, 0.60, 0.60, 1))
+                    material.setSpecular(Vec4(0.80, 0.80, 0.80, 1))
                     material.setShininess(140)
 
                 elif "badges" in material_name:
-                    material.setSpecular(Vec4(0.85, 0.85, 0.85, 1))
-                    material.setShininess(110)
+                    material.setSpecular(Vec4(0.90, 0.90, 0.90, 1))
+                    material.setShininess(130)
 
                 else:
                     continue
 
-                geom_node.setGeomState(
-                    i,
-                    state.addAttrib(MaterialAttrib.make(material))
-                )
+                geom_node.setGeomState(i, state.addAttrib(MaterialAttrib.make(material)))
                 enhanced_count += 1
 
         print(f"[Vehicle] Enhanced glossy materials: {enhanced_count}")
@@ -141,24 +138,16 @@ class F1Vehicle:
                 continue
 
             wheel_position = parts[0].getPos(self.car)
-
-            pivot = self.car.attachNewNode(
-                f"{wheel}_pivot"
-            )
+            pivot = self.car.attachNewNode(f"{wheel}_pivot")
             pivot.setPos(self.car, wheel_position)
-
-            roll_pivot = pivot.attachNewNode(
-                f"{wheel}_roll_pivot"
-            )
+            roll_pivot = pivot.attachNewNode(f"{wheel}_roll_pivot")
 
             for part in parts:
                 if "TYRE" in part.getName():
                     bounds = part.getTightBounds(self.car)
                     if bounds is not None:
                         minimum, maximum = bounds
-                        self.wheel_radius = (
-                            maximum.z - minimum.z
-                        ) / 2.0
+                        self.wheel_radius = (maximum.z - minimum.z) / 2.0
                 part.wrtReparentTo(roll_pivot)
 
             self.wheel_roll_pivots.append(roll_pivot)
@@ -184,12 +173,8 @@ class F1Vehicle:
         if dt == 0.0 or self.wheel_radius <= 0.0:
             return
 
-        rotation_delta = math.degrees(
-            self.speed * dt / self.wheel_radius
-        )
-        self.wheel_rotation = (
-            self.wheel_rotation + rotation_delta
-        ) % 360.0
+        rotation_delta = math.degrees(self.speed * dt / self.wheel_radius)
+        self.wheel_rotation = (self.wheel_rotation + rotation_delta) % 360.0
 
         for pivot in self.wheel_roll_pivots:
             pivot.setR(self.wheel_rotation)
@@ -198,16 +183,10 @@ class F1Vehicle:
         heading = math.degrees(float(steering_angle))
 
         if self.front_left_wheel_pivot is not None:
-            self.front_left_wheel_pivot.setH(
-                self.car,
-                self.front_left_wheel_initial_h + heading
-            )
+            self.front_left_wheel_pivot.setH(self.car, self.front_left_wheel_initial_h + heading)
 
         if self.front_right_wheel_pivot is not None:
-            self.front_right_wheel_pivot.setH(
-                self.car,
-                self.front_right_wheel_initial_h + heading
-            )
+            self.front_right_wheel_pivot.setH(self.car, self.front_right_wheel_initial_h + heading)
 
     def set_position(self, x, y, z=0):
         self.position = Vec3(float(x), float(y), float(z))
@@ -231,14 +210,6 @@ class F1Vehicle:
 
     def get_track_state(self):
         if self.track_geometry is None:
-            raise RuntimeError(
-                "TrackGeometry has not been connected to F1Vehicle."
-            )
+            raise RuntimeError("TrackGeometry has not been connected to F1Vehicle.")
 
-        return self.track_geometry.get_track_position(
-            [
-                self.position.x,
-                self.position.y,
-                self.position.z
-            ]
-        )
+        return self.track_geometry.get_track_position([self.position.x, self.position.y, self.position.z])
