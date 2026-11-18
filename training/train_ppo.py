@@ -7,7 +7,7 @@ from stable_baselines3.common.monitor import Monitor
 from environment.racing_env import RacingEnv
 
 
-TRACK_NAMES = ["yas_marina", "hockenheim", "sochi", "sepang",]
+TRACK_NAMES = ["yas_marina", "hockenheim", "sochi", "sepang", "monza", "sao_paulo", "shanghai",]
 
 TOTAL_TIMESTEPS = 500_000
 MAX_EPISODE_STEPS = 12000
